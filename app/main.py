@@ -1,5 +1,5 @@
-from fastapi import FastAPI
-
+from fastapi import FastAPI, HTTPException
+from pathlib import Path
 app = FastAPI(
     title="Mini-SOAR Demo Application",
     version="1.0.0"
@@ -14,8 +14,13 @@ def root():
     }
 
 
+
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy"
-    }
+    if Path("/tmp/force_unhealthy").exists():
+        raise HTTPException(
+            status_code=503,
+            detail="Simulated unhealthy state"
+        )
+
+    return {"status": "healthy"}
