@@ -1,68 +1,106 @@
 # Zabbix Detection Rules
 
-Mini-SOAR currently uses three custom Zabbix triggers as its detection layer. The expressions below are preserved from the existing lab configuration and are the repository's source of truth.
+Mini-SOAR uses three documented Zabbix triggers for the `demo-web` workload. The expressions below reflect the lab configuration recorded in this repository. Because no exported Zabbix template is committed, verify them against the live Zabbix instance after configuration changes.
 
-## HIGH_CPU
+## Common Tags
+
+Each managed trigger should include:
+
+| Tag | Value |
+|---|---|
+| `managed_by` | `mini-soar` |
+| `service` | `demo-web` |
+| `event_type` | Event-specific value shown below |
+
+These tags drive Zabbix Action selection and Mini-SOAR routing. They must use the exact enum values expected by the application.
+
+## `HIGH_CPU`
 
 | Field | Value |
 |---|---|
 | Trigger name | `[Mini-SOAR] demo-web High CPU utilization` |
-| Event type | `HIGH_CPU` |
-| Target | `demo-web` |
+| `event_type` tag | `HIGH_CPU` |
 | Severity | High |
 | Detection condition | Average container CPU utilization over two minutes exceeds 80% |
-| Purpose | Detect sustained CPU pressure on the monitored workload |
+| Mini-SOAR response | Investigation-only dry run |
 
-### Current expression
+### Documented Expression
 
 ```text
 avg(/lab-server_192.168.136.110/docker.container_stats.cpu_pct_usage["/demo-web"],2m)>80
 ```
 
-### Expected recovery behavior
+### Recovery
 
-The event should recover after the two-minute average no longer exceeds 80%. Because the rule uses a moving average, recovery may occur after the simulated load has already stopped.
+The problem recovers after the two-minute average no longer exceeds 80%. Recovery may lag behind stopping the injected workload because the expression uses a moving window.
 
-## CONTAINER_DOWN
+Mini-SOAR intentionally does not restart `demo-web` for this event. High CPU can have valid causes and does not by itself establish that a restart is the safest response.
+
+## `CONTAINER_DOWN`
 
 | Field | Value |
 |---|---|
 | Trigger name | `[Mini-SOAR] demo-web Container down` |
-| Event type | `CONTAINER_DOWN` |
-| Target | `demo-web` |
+| `event_type` tag | `CONTAINER_DOWN` |
 | Severity | High |
-| Detection condition | The container running-state item becomes false (`0`) |
-| Purpose | Detect loss of the monitored container process |
+| Detection condition | Container running state becomes false (`0`) |
+| Mini-SOAR response | Start the allowlisted container and verify it |
 
-### Current expression
+### Documented Expression
 
 ```text
 last(/lab-server_192.168.136.110/docker.container_info.state.running["/demo-web"])=0
 ```
 
-### Expected recovery behavior
+### Recovery
 
-The event should recover after `demo-web` is started again and Zabbix receives a running-state value of true (`1`). Stopped containers must remain discoverable so the state item remains available during the incident.
+The event recovers after Mini-SOAR starts `demo-web` and Zabbix receives a running-state value of `1`. Docker discovery must keep stopped containers visible so this item remains available during the incident.
 
-## CONTAINER_UNHEALTHY
+## `CONTAINER_UNHEALTHY`
 
 | Field | Value |
 |---|---|
 | Trigger name | `[Mini-SOAR] demo-web Container unhealthy` |
-| Event type | `CONTAINER_UNHEALTHY` |
-| Target | `demo-web` |
+| `event_type` tag | `CONTAINER_UNHEALTHY` |
 | Severity | High |
-| Detection condition | Docker reports health state `2` (unhealthy) for `demo-web` |
-| Purpose | Detect application health failure while the workload is monitored as a container |
+| Detection condition | Docker reports health state `2` (`unhealthy`) |
+| Mini-SOAR response | Restart the running container and verify it |
 
-### Current expression
+### Documented Expression
 
 ```text
 last(/lab-server_192.168.136.110/docker.container_info.state.health["/demo-web"])=2
 ```
 
-The operational scenario assumes the container is still running while Docker reports it as unhealthy. The current stored expression evaluates the health item directly; it does not add a separate running-state predicate.
+The stored expression evaluates Docker health directly and does not contain a separate running-state predicate. The operational scenario assumes the container is still running while unhealthy. The playbook defensively starts it if it has stopped before remediation begins.
 
-### Expected recovery behavior
+### Recovery
 
-The event should recover after the cause of the failed health check is removed and Docker reports a health value other than unhealthy. Zabbix recovery follows the next collected healthy state and the trigger evaluation interval.
+The demo workload's lab-only fault state is held in process memory. Restarting `demo-web` clears the state, its health endpoint returns success, Docker reports `healthy`, and Zabbix emits a recovery event.
+
+## Event Lifecycle
+
+```text
+Metric change
+    -> Zabbix PROBLEM
+    -> Action and webhook
+    -> Mini-SOAR route
+    -> Optional guarded remediation
+    -> Zabbix RECOVERY
+    -> Mini-SOAR logs recovery only
+```
+
+Zabbix may retry or deliver repeated event notifications. Mini-SOAR deduplicates an acquired event ID in memory and writes duplicate decisions as `SKIPPED` audit records.
+
+## Validation
+
+Use the controlled scripts documented in [scripts/README.md](../scripts/README.md). During self-healing tests, do not manually recover the container before Mini-SOAR has a chance to act.
+
+The current screenshots include:
+
+- [HIGH_CPU problem](../docs/images/06-high-cpu-problem.png)
+- [Container down and unhealthy problems](../docs/images/07-container-down&unhealthy-problem.png)
+- [Resolved problems](../docs/images/08-problem-resolved.png)
+- [Container routing evidence](../docs/images/11-container-down-routing.png)
+- [Unhealthy routing evidence](../docs/images/13-container-unhealthy-routing.png)
+- [HIGH_CPU investigation policy](../docs/images/14-high-cpu-routing.png)
