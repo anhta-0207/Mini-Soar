@@ -62,8 +62,6 @@ class RemediationGuard:
                     reason="duplicate_event",
                 )
 
-            self._seen_events[event_id] = now
-
             # 2. Another remediation is already running
             if container in self._in_progress:
                 return GuardResult(
@@ -85,6 +83,9 @@ class RemediationGuard:
                         reason=f"cooldown_active:{remaining:.0f}s",
                     )
 
+            # Only consume an event ID after all temporary guards pass.
+            # This allows events skipped due to lock/cooldown to be retried.
+            self._seen_events[event_id] = now
             self._in_progress.add(container)
 
             return GuardResult(

@@ -32,11 +32,6 @@ def handle_container_recovery(event: SOAREvent):
         event_id=str(event.event_id),
     )
 
-    guard = remediation_guard.try_acquire(
-    container=container,
-    event_id=str(event.event_id),
-    )
-
     if not guard.allowed:
         duration = time.monotonic() - started_at
 
