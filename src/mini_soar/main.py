@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 
 from mini_soar.api.zabbix import router as zabbix_router
-
+from mini_soar.api.remediations import router as remediations_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +27,10 @@ app.include_router(
     prefix="/api/v1",
 )
 
+app.include_router(
+    remediations_router,
+    prefix="/api/v1",
+)
 
 @app.get("/health")
 def health():

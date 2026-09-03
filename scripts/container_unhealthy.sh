@@ -1,10 +1,15 @@
 #!/bin/bash
 
-CONTAINER="demo-web"
+set -e
 
-echo "[*] Simulating unhealthy application state"
+URL="http://localhost:8000"
 
-docker exec "$CONTAINER" touch /tmp/force_unhealthy
+echo "[*] Simulating unhealthy state for demo-web..."
 
-echo "[+] Failure flag created"
-echo "[*] Waiting for Docker HEALTHCHECK to detect failure"
+curl -fsS \
+  -X POST \
+  "$URL/simulate/unhealthy"
+
+echo
+echo "[+] Fault injected successfully"
+echo "[*] Waiting for Docker healthcheck to detect the failure..."
