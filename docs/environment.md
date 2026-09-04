@@ -2,7 +2,7 @@
 
 ## Scope
 
-Mini-SOAR runs in an isolated Linux lab. The monitored Docker workload, Zabbix Agent 2, and Mini-SOAR engine are hosted on the same server; Zabbix Server runs on a separate lab node.
+Mini-SOAR runs in an isolated Linux lab. The monitored Docker workload, Zabbix Agent 2, and Mini-SOAR engine are hosted on the same server; Zabbix Server runs on a separate lab node. Phase 5 also provides a React/TypeScript dashboard and Vite development server.
 
 No password, token, private key, or other credential belongs in this document.
 
@@ -15,8 +15,25 @@ No password, token, private key, or other credential belongs in this document.
 | `demo-web` | `192.168.136.110:8000` | Controlled FastAPI workload and Docker health target |
 | Mini-SOAR API | `192.168.136.110:9000` | Webhook ingestion, process health, and remediation history API |
 | MariaDB | Local to the monitored host | Stores the `mini_soar.remediation_history` audit table |
+| Dashboard development server | Port `5173` | Serves the Vite UI and proxies backend requests during development |
 
 These private addresses describe the current lab and should be adjusted for another environment.
+
+## Development Prerequisites
+
+- Linux and Docker for the monitored workload and remediation lab
+- Python and a virtual environment for the backend
+- MariaDB for remediation persistence and dashboard data
+- Node.js and npm for the frontend
+- Zabbix Server and Zabbix Agent 2 for monitoring and event delivery
+
+## Development Ports
+
+| Port | Component | Source of configuration |
+|---|---|---|
+| `8000` | `demo-web` workload | Root `Dockerfile` and Uvicorn command |
+| `9000` | Mini-SOAR FastAPI backend | Backend launch command and Vite proxy target |
+| `5173` | Vite dashboard development server | `frontend/vite.config.ts` |
 
 ## Runtime Components
 
@@ -47,7 +64,7 @@ docker run -d \
   mini-soar-demo-web
 ```
 
-### Mini-SOAR Engine
+### Backend Development (Mini-SOAR Engine)
 
 Create an isolated Python environment and install the tracked dependencies:
 
@@ -67,6 +84,34 @@ python -m uvicorn mini_soar.main:app \
 ```
 
 The account running Mini-SOAR must be able to invoke the Docker CLI against the local daemon. Docker daemon access is highly privileged; grant it only inside the intended lab boundary.
+
+### Frontend Development
+
+The Vite configuration binds the development server to `0.0.0.0:5173`. It proxies `/api` and `/health` to the backend at `http://127.0.0.1:9000`, so the backend must be reachable on the same development machine for this configuration.
+
+Install dependencies and start the frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173` locally, or use the lab host address only from a browser that is allowed to reach the development server.
+
+Create an optimized static build with:
+
+```bash
+npm run build
+```
+
+The output is generated in `frontend/dist/` and ignored by Git. The repository does not currently define a production web server or deployment configuration for these files.
+
+The development request flow is:
+
+```text
+Browser -> Vite :5173 -> /api proxy -> FastAPI :9000 -> MariaDB
+```
 
 ## Environment Variables
 
@@ -107,6 +152,8 @@ The required lab paths are:
 | Zabbix Server | Monitored host TCP `9000` | Deliver Mini-SOAR webhook requests |
 | Browser/operator | Monitored host TCP `8000` | Access and simulate the demo workload |
 | Browser/operator | Monitored host TCP `9000` | Access Mini-SOAR health, Swagger, and remediation APIs |
+| Browser/operator | Frontend development host TCP `5173` | Access the Vite dashboard during development |
+| Vite development server | Local FastAPI TCP `9000` | Proxy `/api` and `/health` requests |
 | Zabbix Server | Zabbix Agent 2 TCP `10050` | Passive agent checks when used by the lab configuration |
 | Mini-SOAR | Local Docker daemon | Inspect, start, restart, and verify `demo-web` |
 | Mini-SOAR | Local MariaDB TCP `3306` | Persist and query remediation history |
@@ -132,13 +179,17 @@ curl -s "http://localhost:9000/api/v1/remediations?limit=5"
 
 Open `http://192.168.136.110:9000/docs` from a browser that can reach the lab network.
 
+With both development servers running, open `http://localhost:5173` and confirm that the dashboard reports `Operational`, renders summary/distribution data, and lists recent remediations. The indicator is based on the dashboard's API requests rather than a dedicated `/health` poll.
+
 ## Runtime Data
 
 - Local remediation audit: `logs/remediation.jsonl`
 - MariaDB schema: `database/schema.sql`
 - Local environment values: `.env`
+- Frontend dependency cache: `frontend/node_modules/`
+- Frontend build output: `frontend/dist/`
 
-The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, and `logs/` paths are ignored by Git.
+The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `logs/`, `frontend/node_modules/`, and `frontend/dist/` paths are ignored by Git.
 
 ## Current Limitations
 
@@ -147,4 +198,6 @@ The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, and `logs/` paths are ignored by 
 - Guard state is per-process and disappears on restart.
 - The current allowlist supports only `demo-web`.
 - MariaDB must be reachable for history API queries.
-- Dashboard, notification, Jenkins, and durable worker components are not deployed.
+- The dashboard is read-only; it does not provide browser-triggered remediation.
+- The repository has frontend source and development/build tooling but no production dashboard hosting configuration.
+- Notification, Jenkins, and durable worker components are not implemented.

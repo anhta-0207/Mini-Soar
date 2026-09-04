@@ -1,19 +1,20 @@
 # Mini-SOAR
 
-Mini-SOAR is an event-driven monitoring and self-healing lab that connects Zabbix detection to guarded Docker remediation, health verification, and auditable incident history.
-
-It is a portfolio implementation for DevOps, security automation, and site reliability engineering. The project applies production-oriented design principles, but it is intentionally scoped to an isolated lab and is not presented as production-ready software.
+**Event-Driven Security Monitoring & Self-Healing Automation**
 
 ## Overview
 
-Monitoring systems can detect service failures without taking a safe, traceable recovery action. Mini-SOAR demonstrates the next part of that workflow: accept a structured Zabbix event, classify it, enforce remediation policy, perform a narrowly allowed Docker action, verify recovery, and persist the result.
+Mini-SOAR is an isolated DevOps and security automation lab that connects Zabbix detection to guarded Docker remediation, recovery verification, an auditable incident history, REST APIs, and a read-only security operations dashboard.
 
-Phases 1 through 4 are implemented:
+The project demonstrates a deliberately narrow SOAR workflow for a single monitored workload. It is a portfolio project, not a replacement for an enterprise SOAR platform and not production-ready infrastructure.
 
-- Linux and Docker workload infrastructure;
-- Zabbix monitoring and detection;
-- webhook ingestion, event normalization, and routing;
-- automated container remediation, verification, audit persistence, and history APIs.
+Phases 1 through 5 are implemented:
+
+- Linux and Docker workload infrastructure
+- Zabbix monitoring and detection
+- Webhook ingestion, event normalization, and routing
+- Automated container remediation, verification, audit persistence, and history APIs
+- A read-only React and TypeScript security operations dashboard
 
 ## Key Features
 
@@ -26,32 +27,45 @@ Phases 1 through 4 are implemented:
 - Container allowlist, event deduplication, per-container lock, and cooldown
 - Post-remediation running-state and Docker health verification
 - JSONL audit records plus MariaDB persistence
-- REST endpoints for remediation history and event lookup
+- REST endpoints for remediation history, summary, distribution, and event lookup
+- React and TypeScript dashboard with KPIs, filters, analytics, and refresh controls
 - Controlled Bash scripts for repeatable failure injection
 - Unit coverage for the remediation guard
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    A[demo-web workload] --> B[Docker]
-    B --> C[Zabbix Agent 2]
-    C --> D[Zabbix Server]
-    D --> E[Trigger and Action]
-    E --> F[FastAPI webhook]
-    F --> G[Event Parser]
-    G --> H[Event Router]
-    H --> I[Remediation Guard]
-    I --> J[Playbook]
-    J --> K[DockerService]
-    K --> L[Health Verification]
-    L --> M[AuditService]
-    M --> N[JSONL]
-    M --> O[MariaDB]
-    O --> P[Remediation REST API]
+```text
+Automation / control plane
+
+demo-web -> Zabbix Agent 2 -> Zabbix Server -> Trigger -> Action
+                                                        |
+                                                        v
+                                              FastAPI webhook
+                                                        |
+                                                        v
+                                      Parser -> Router -> Guard
+                                                        |
+                                                        v
+                                    Playbooks -> DockerService
+                                                        |
+                                                        v
+                                     demo-web -> Verification
+                                                        |
+                                                        v
+                                                  AuditService
+                                                   /         \
+                                                  v           v
+                                               JSONL       MariaDB
+
+Observability plane
+
+MariaDB -> FastAPI remediation APIs -> Vite development proxy
+                                      -> React/TypeScript dashboard
 ```
 
-The webhook route executes synchronously in the current implementation. `RECOVERY` events are logged and stop at the router; they do not trigger another remediation.
+The dashboard is separate from the automation path. It reads persisted remediation data and has no control that starts or restarts a container, invokes a playbook, or executes a shell command.
+
+The webhook route executes synchronously in the current implementation. `RECOVERY` events are logged and stop at the router; they do not trigger remediation.
 
 See [the technical architecture](docs/architecture.md) for component boundaries, detailed data flows, and current limitations.
 
@@ -61,19 +75,18 @@ See [the technical architecture](docs/architecture.md) for component boundaries,
 |---|---|
 | Host and workload | Linux, Docker |
 | Monitoring and detection | Zabbix Server, Zabbix Agent 2 |
-| Application | Python 3.12, FastAPI, Pydantic, Uvicorn/Gunicorn |
+| Backend | Python, FastAPI, Pydantic, Uvicorn/Gunicorn |
 | Remediation | Python subprocess argument lists, Docker CLI |
 | Persistence | JSONL, MariaDB, PyMySQL |
+| Dashboard | React, TypeScript, Vite |
 | Failure simulation | Bash, curl |
 | Source control | Git, GitHub |
 
-Dashboard, notification, and Jenkins capabilities remain roadmap items.
-
-## Detection and Response Policy
+## Event Types
 
 | Event | Detection intent | Current response |
 |---|---|---|
-| `HIGH_CPU` | Sustained `demo-web` CPU utilization above the configured threshold | Investigation-only dry run; no automatic restart |
+| `HIGH_CPU` | Sustained `demo-web` CPU utilization above the configured threshold | Investigation-only dry run; logs intent but does not restart or write a remediation record |
 | `CONTAINER_DOWN` | Docker running state becomes false | Collect evidence, start `demo-web`, then verify it |
 | `CONTAINER_UNHEALTHY` | Docker reports the workload as unhealthy | Collect evidence, restart the running container, then verify it |
 
@@ -83,21 +96,22 @@ Trigger expressions and required event tags are documented in [zabbix/triggers.m
 
 ## Automated Remediation
 
-For container incidents, the router calls the container recovery playbook:
+For container `PROBLEM` events, the router calls the container recovery playbook:
 
 1. Validate that the event identifies a service.
-2. Ask the remediation guard to acquire the container.
-3. Collect recent container logs as evidence.
-4. Start a stopped container or restart an unhealthy running container.
-5. Poll Docker until the container is running and its health is `healthy` (or it has no health check).
-6. Release the guard and write the outcome to JSONL and MariaDB.
+2. Ask the remediation guard to acquire the event/container pair.
+3. Collect the last 50 lines of container logs as pre-remediation evidence.
+4. For `CONTAINER_DOWN`, start the container only if it is stopped.
+5. For `CONTAINER_UNHEALTHY`, restart it if running or defensively start it if it stopped before handling.
+6. Poll Docker for up to 90 seconds until the container is running and its health is `healthy` (or it has no health check).
+7. Release the guard and write the outcome to JSONL and MariaDB.
 
 The playbook records `SUCCESS`, `FAILED`, or `ERROR` for attempted remediation. Guard denials are recorded as `SKIPPED` with a reason such as `duplicate_event`, `remediation_in_progress`, or `cooldown_active`.
 
-## Remediation Safety
+### Safety Controls
 
 - Only containers in `DockerService.allowed_containers` can be inspected or changed; the current allowlist contains only `demo-web`.
-- Webhook fields are never interpolated into a shell command. Docker commands use fixed argument lists with `shell=False` behavior.
+- Webhook fields are never interpolated into a shell command. Docker commands use fixed argument lists, and the API exposes no arbitrary shell execution.
 - Docker subprocesses have a 15-second timeout.
 - Event IDs are deduplicated in memory for 600 seconds after acquisition.
 - A per-container in-memory lock prevents overlapping remediation in the same process.
@@ -109,6 +123,17 @@ The playbook records `SUCCESS`, `FAILED`, or `ERROR` for attempted remediation. 
 
 These controls reduce risk inside the lab; they do not replace host isolation, least-privilege Docker access, webhook authentication, or a durable job system.
 
+## Remediation Guard
+
+The in-memory guard applies its checks atomically within the current Python process:
+
+- **Duplicate event:** retains an acquired `event_id` for 600 seconds.
+- **In progress:** permits only one active remediation for a container.
+- **Cooldown:** blocks new remediation for 60 seconds after a successful verified recovery.
+- **Event TTL:** removes expired event IDs from the deduplication set.
+
+Events denied by the in-progress or cooldown checks are not consumed, so they can be retried later. Guard state is not durable and is not shared across multiple worker processes.
+
 ## Audit and Persistence
 
 Each remediation decision includes:
@@ -119,6 +144,8 @@ Each remediation decision includes:
 - action and status;
 - duration;
 - result or skip message.
+
+Workflow status values are `SUCCESS`, `FAILED`, `ERROR`, and `SKIPPED`.
 
 Local audit records are appended to `logs/remediation.jsonl`. The same decision is inserted into the MariaDB `mini_soar.remediation_history` table defined in [database/schema.sql](database/schema.sql).
 
@@ -139,7 +166,9 @@ python -m uvicorn mini_soar.main:app \
 |---|---|---|
 | `GET` | `/health` | Mini-SOAR process health |
 | `POST` | `/api/v1/webhooks/zabbix` | Receive and route a Zabbix event |
-| `GET` | `/api/v1/remediations` | List remediation history |
+| `GET` | `/api/v1/remediations` | List remediation history with optional `limit`, `status`, and `event_type` filters |
+| `GET` | `/api/v1/remediations/summary` | Return totals, outcome counts, success rate, and average successful-remediation duration |
+| `GET` | `/api/v1/remediations/distribution` | Return counts grouped by status and event type |
 | `GET` | `/api/v1/remediations/{event_id}` | Return the latest record for an event ID |
 
 The list endpoint accepts `limit` (default `20`, range `1`-`100`), `status`, and `event_type`.
@@ -156,7 +185,45 @@ curl -s \
 
 Interactive OpenAPI documentation is available at `http://localhost:9000/docs` while the service is running.
 
-## Failure Simulation
+MariaDB query failures are returned as HTTP `503`; an unknown event ID returns HTTP `404`.
+
+## Security Operations Dashboard
+
+Phase 5 adds a responsive dark dashboard in `frontend/`, implemented with React and TypeScript. It provides:
+
+- KPI cards for Total Incidents, Success Rate, Skipped, and Average Remediation Duration
+- The 10 most recent remediation records
+- Status and event-type filters for the history table
+- Manual refresh and automatic refresh every 15 seconds
+- Last-updated timestamp
+- Status and event-type distribution charts
+- An `Operational` or `API Unavailable` indicator based on the dashboard data requests
+- Loading, error, and empty-data states
+
+The summary and distribution describe all persisted remediation records; the selected filters apply to the recent-history request. The average duration is calculated from successful remediations only.
+
+The dashboard is intentionally **read-only**. It does not expose browser-triggered remediation, playbook execution, container control, or shell execution.
+
+## Dashboard Architecture
+
+```text
+MariaDB
+   |
+   v
+FastAPI REST API :9000
+   |
+   v
+Vite development proxy :5173
+   |
+   v
+React/TypeScript dashboard
+```
+
+During development, Vite proxies `/api` and `/health` to `http://127.0.0.1:9000`. The dashboard data service uses the `/api/v1` routes. The proxy is development convenience, not an authentication or authorization boundary.
+
+## Fault Injection / Demo
+
+> **For isolated lab/demo use only.** Do not expose or copy these simulation mechanisms into production workloads.
 
 Run these scripts only in the isolated lab:
 
@@ -166,6 +233,8 @@ Run these scripts only in the isolated lab:
 | `./scripts/container_unhealthy.sh` | Calls the workload's lab-only unhealthy endpoint | Zabbix emits `CONTAINER_UNHEALTHY`; Mini-SOAR restarts and verifies it |
 | `./scripts/container_unhealthy_recover.sh` | Clears the in-memory unhealthy state manually | Used only when testing detection without automatic restart |
 | `./scripts/cpu_spike.sh` | Starts sustained CPU work inside `demo-web` | Zabbix emits `HIGH_CPU`; Mini-SOAR remains investigation-only |
+
+The workload also exposes `POST /simulate/unhealthy`, `POST /simulate/recover`, and `GET /simulate/status` for the controlled unhealthy scenario.
 
 The unhealthy simulation is in memory. Restarting the workload process resets it; the current implementation does not use a `/tmp/force_unhealthy` flag.
 
@@ -192,6 +261,14 @@ mini-soar/
 |   |-- architecture.md
 |   |-- environment.md
 |   `-- images/                       # real lab evidence
+|-- frontend/
+|   |-- src/
+|   |   |-- components/               # cards, charts, and history table
+|   |   |-- pages/                    # dashboard and refresh state
+|   |   |-- services/                 # REST API client
+|   |   `-- types/                    # API response types
+|   |-- package.json
+|   `-- vite.config.ts
 |-- scripts/
 |   |-- README.md
 |   |-- container_down.sh
@@ -220,7 +297,61 @@ mini-soar/
 `-- requirements.txt
 ```
 
+Generated frontend dependencies and builds (`frontend/node_modules/` and `frontend/dist/`) are ignored and are not part of the project tree.
+
+## Prerequisites
+
+- Linux
+- Docker
+- Python
+- MariaDB
+- Node.js and npm
+- Zabbix Server and Zabbix Agent 2
+
+## Backend Development
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+
+python -m uvicorn mini_soar.main:app \
+  --app-dir src \
+  --host 0.0.0.0 \
+  --port 9000
+```
+
+## Frontend Development
+
+With the backend listening on the same development machine at `127.0.0.1:9000`:
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Build the static assets with:
+
+```bash
+npm run build
+```
+
+The repository does not currently define production hosting for the generated `frontend/dist/` assets.
+
+## API and Dashboard Development Flow
+
+```text
+Browser -> Vite :5173 -> /api proxy -> FastAPI :9000 -> MariaDB
+```
+
 ## Demo Evidence
+
+### Phase 5 dashboard
+
+![Mini-SOAR Dashboard](docs/images/21-mini-soar-dashboard.png)
+
+![Mini-SOAR Dashboard filters](docs/images/22-dashboard-filter.png)
 
 ### Monitoring and end-to-end event delivery
 
@@ -255,19 +386,37 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 - [Zabbix detection rules](zabbix/triggers.md)
 - [Zabbix template export policy](zabbix/templates/README.md)
 
+## Security Considerations
+
+- The container allowlist restricts the current remediation target to `demo-web`.
+- Docker operations use argument lists rather than shell-evaluated webhook input.
+- SQL values use PyMySQL parameters.
+- Secrets are loaded from environment variables; `.env.example` contains placeholders only.
+- `.env`, virtual environments, Python caches, runtime logs, frontend dependencies, and frontend builds are ignored by Git.
+- The dashboard is read-only and has no direct Docker or playbook control.
+- The Python webhook handler consumes `event_type` and `service` tags but does not enforce `managed_by`; intended-event filtering must be applied in Zabbix and at the network boundary.
+- The webhook and remediation history APIs currently have no authentication or authorization.
+- Docker daemon access is highly privileged, and this lab architecture is not hardened production infrastructure.
+
 ## Roadmap
 
-The following capabilities are planned and are not implemented in the current repository:
+### Completed
 
-- dashboard/frontend consuming the remediation API;
-- Telegram or other incident notifications;
-- Jenkins CI/CD;
-- durable queue or background remediation workers;
-- database-backed deduplication and cooldown state;
-- retry, backoff, attempt limits, and circuit breaking;
-- webhook/API authentication and authorization;
-- broader unit, API, and integration test coverage;
-- structured metrics and production observability.
+- Monitoring and Docker workload discovery
+- Zabbix detection and webhook delivery
+- Event normalization and routing
+- Guarded automated remediation and verification
+- JSONL and MariaDB audit persistence
+- Remediation REST APIs
+- Read-only React/TypeScript security operations dashboard
+
+### Planned
+
+- Notification and alert delivery
+- Jenkins CI/CD
+- Webhook/API authentication and authorization
+- Durable workers, persistent guard state, retry/backoff, and circuit breaking
+- Broader automated tests and production-oriented observability
 
 ## Project Status
 
@@ -275,6 +424,7 @@ The following capabilities are planned and are not implemented in the current re
 |---|---|---|
 | Phase 1 | Infrastructure and monitored workload | Complete |
 | Phase 2 | Monitoring and detection | Complete |
-| Phase 3 | Event ingestion and routing | Complete |
-| Phase 4 | Automated remediation, audit, database, and history API | Complete |
-| Phase 5+ | Dashboard, notification, CI/CD, and hardening | Planned |
+| Phase 3 | Event ingestion, normalization, and routing | Complete |
+| Phase 4 | Automated remediation, verification, audit, persistence, and REST API | Complete |
+| Phase 5 | Read-only security operations dashboard | Complete |
+| Future | Notifications, CI/CD, and additional hardening | Planned |

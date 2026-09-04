@@ -1,32 +1,37 @@
-# React + TypeScript + Vite
+# Mini-SOAR Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+This directory contains the Phase 5 read-only security operations dashboard built with React, TypeScript, and Vite. It presents persisted remediation history and analytics from the Mini-SOAR FastAPI backend.
 
-Currently, two official plugins are available:
+The UI does not expose remediation, playbook, Docker, or shell controls.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Development
 
-## React Compiler
+Start the backend at `127.0.0.1:9000`, then run:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Vite serves the dashboard on `0.0.0.0:5173` and proxies `/api` and `/health` to the backend. Open `http://localhost:5173` for local development.
+
+## Available Scripts
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Start the Vite development server |
+| `npm run build` | Type-check and create a production-mode bundle in `dist/` |
+| `npm run lint` | Run Oxlint |
+| `npm run preview` | Preview the generated bundle locally |
+
+The repository does not currently include production hosting or deployment configuration for `dist/`.
+
+## Backend Data
+
+The dashboard client calls:
+
+- `GET /api/v1/remediations`
+- `GET /api/v1/remediations/summary`
+- `GET /api/v1/remediations/distribution`
+
+See the repository [README](../README.md) and [environment documentation](../docs/environment.md) for the full architecture, backend startup, and lab constraints.
