@@ -191,3 +191,81 @@ class DatabaseService:
 
         finally:
             connection.close()
+    def get_remediation_summary(self) -> dict:
+        sql = """
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(CASE
+                    WHEN status = 'SUCCESS' THEN 1
+                    ELSE 0
+                END) AS success,
+
+                SUM(CASE
+                    WHEN status = 'FAILED' THEN 1
+                    ELSE 0
+                END) AS failed,
+
+                SUM(CASE
+                    WHEN status = 'ERROR' THEN 1
+                    ELSE 0
+                END) AS error,
+
+                SUM(CASE
+                    WHEN status = 'SKIPPED' THEN 1
+                    ELSE 0
+                END) AS skipped,
+
+                AVG(
+                    CASE
+                        WHEN status = 'SUCCESS'
+                        THEN duration_seconds
+                        ELSE NULL
+                    END
+                ) AS average_duration_seconds
+
+            FROM remediation_history
+        """
+
+        connection = self._connect()
+
+        try:
+            with connection.cursor(
+                pymysql.cursors.DictCursor
+            ) as cursor:
+                cursor.execute(sql)
+                row = cursor.fetchone()
+
+        finally:
+            connection.close()
+
+        total = int(row["total"] or 0)
+        success = int(row["success"] or 0)
+        failed = int(row["failed"] or 0)
+        error = int(row["error"] or 0)
+        skipped = int(row["skipped"] or 0)
+
+        average_duration = (
+            float(row["average_duration_seconds"])
+            if row["average_duration_seconds"] is not None
+            else 0.0
+        )
+
+        success_rate = (
+            round((success / total) * 100, 2)
+            if total > 0
+            else 0.0
+        )
+
+        return {
+            "total": total,
+            "success": success,
+            "failed": failed,
+            "error": error,
+            "skipped": skipped,
+            "success_rate": success_rate,
+            "average_duration_seconds": round(
+                average_duration,
+                3,
+            ),
+        }
