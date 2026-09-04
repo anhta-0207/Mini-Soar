@@ -19,3 +19,12 @@ class RemediationRecord(BaseModel):
 class RemediationListResponse(BaseModel):
     count: int
     items: list[RemediationRecord]
+
+class RemediationSummary(BaseModel):
+    total: int
+    success: int
+    failed: int
+    error: int
+    skipped: int
+    success_rate: float
+    average_duration_seconds: float
