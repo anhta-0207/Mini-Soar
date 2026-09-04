@@ -28,3 +28,6 @@ class RemediationSummary(BaseModel):
     skipped: int
     success_rate: float
     average_duration_seconds: float
+class RemediationDistribution(BaseModel):
+    status: dict[str, int]
+    event_type: dict[str, int]

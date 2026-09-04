@@ -25,3 +25,7 @@ export interface RemediationListResponse {
   count: number;
   items: RemediationRecord[];
 }
+export interface RemediationDistribution {
+  status: Record<string, number>;
+  event_type: Record<string, number>;
+}

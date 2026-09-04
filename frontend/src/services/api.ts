@@ -1,4 +1,5 @@
 import type {
+  RemediationDistribution,
   RemediationListResponse,
   RemediationSummary,
 } from "../types/remediation";
@@ -17,16 +18,51 @@ async function request<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function getRemediationSummary(): Promise<RemediationSummary> {
+export interface RemediationFilters {
+  limit?: number;
+  status?: string;
+  eventType?: string;
+}
+
+export async function getRemediationSummary():
+  Promise<RemediationSummary> {
   return request<RemediationSummary>(
     `${API_BASE}/remediations/summary`
   );
 }
 
+export async function getRemediationDistribution():
+  Promise<RemediationDistribution> {
+  return request<RemediationDistribution>(
+    `${API_BASE}/remediations/distribution`
+  );
+}
+
 export async function getRemediations(
-  limit = 20
+  filters: RemediationFilters = {}
 ): Promise<RemediationListResponse> {
+  const params = new URLSearchParams();
+
+  params.set(
+    "limit",
+    String(filters.limit ?? 20)
+  );
+
+  if (filters.status) {
+    params.set(
+      "status",
+      filters.status
+    );
+  }
+
+  if (filters.eventType) {
+    params.set(
+      "event_type",
+      filters.eventType
+    );
+  }
+
   return request<RemediationListResponse>(
-    `${API_BASE}/remediations?limit=${limit}`
+    `${API_BASE}/remediations?${params.toString()}`
   );
 }

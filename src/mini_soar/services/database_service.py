@@ -16,6 +16,52 @@ class DatabaseService:
         self.database = os.getenv("DB_NAME", "mini_soar")
         self.user = os.getenv("DB_USER", "mini_soar")
         self.password = os.getenv("DB_PASSWORD", "")
+    def get_remediation_distribution(self) -> dict:
+        status_sql = """
+            SELECT
+                status,
+                COUNT(*) AS count
+            FROM remediation_history
+            GROUP BY status
+        """
+
+        event_type_sql = """
+            SELECT
+                event_type,
+                COUNT(*) AS count
+            FROM remediation_history
+            GROUP BY event_type
+        """
+
+        connection = self._connect()
+
+        try:
+            with connection.cursor(
+                pymysql.cursors.DictCursor
+            ) as cursor:
+                cursor.execute(status_sql)
+                status_rows = cursor.fetchall()
+
+                cursor.execute(event_type_sql)
+                event_type_rows = cursor.fetchall()
+
+        finally:
+            connection.close()
+
+        status_distribution = {
+            row["status"]: int(row["count"])
+            for row in status_rows
+        }
+
+        event_type_distribution = {
+            row["event_type"]: int(row["count"])
+            for row in event_type_rows
+        }
+
+        return {
+            "status": status_distribution,
+            "event_type": event_type_distribution,
+        }
 
     def _connect(self):
         return pymysql.connect(

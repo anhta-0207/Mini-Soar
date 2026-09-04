@@ -14,6 +14,13 @@ from mini_soar.core.remediation import (
     RemediationSummary,
 )
 
+from mini_soar.core.remediation import (
+    RemediationDistribution,
+    RemediationListResponse,
+    RemediationRecord,
+    RemediationSummary,
+)
+
 logger = logging.getLogger("mini-soar")
 
 router = APIRouter(
@@ -62,7 +69,6 @@ def list_remediations(
             detail="Unable to retrieve remediation history",
         )
 
-
 @router.get(
     "/remediations/summary",
     response_model=RemediationSummary,
@@ -79,6 +85,24 @@ def get_remediation_summary():
         raise HTTPException(
             status_code=503,
             detail="Unable to retrieve remediation summary",
+        )
+
+@router.get(
+    "/remediations/distribution",
+    response_model=RemediationDistribution,
+)
+def get_remediation_distribution():
+    try:
+        return database.get_remediation_distribution()
+
+    except Exception:
+        logger.exception(
+            "[API] Failed to retrieve remediation distribution"
+        )
+
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to retrieve remediation distribution",
         )
 
 @router.get(
