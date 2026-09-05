@@ -198,11 +198,10 @@ export default function Dashboard() {
           </div>
 
           <div
-            className={`system-status ${
-              error
-                ? "system-status--error"
-                : "system-status--online"
-            }`}
+            className={`system-status ${error
+              ? "system-status--error"
+              : "system-status--online"
+              }`}
           >
             <span className="system-status__dot" />
 
@@ -375,16 +374,16 @@ export default function Dashboard() {
               <div className="toolbar-actions">
                 {(statusFilter ||
                   eventTypeFilter) && (
-                  <button
-                    type="button"
-                    className="toolbar-button toolbar-button--secondary"
-                    onClick={
-                      clearFilters
-                    }
-                  >
-                    Clear
-                  </button>
-                )}
+                    <button
+                      type="button"
+                      className="toolbar-button toolbar-button--secondary"
+                      onClick={
+                        clearFilters
+                      }
+                    >
+                      Clear
+                    </button>
+                  )}
 
                 <button
                   type="button"
