@@ -5,7 +5,23 @@ pipeline {
 
     options {
         timestamps()
+
+        // Prevent two deployments from the same job running concurrently.
         disableConcurrentBuilds()
+
+        // We perform checkout explicitly in the Checkout stage.
+        skipDefaultCheckout(true)
+
+        // Allow "Restart from Stage" to recover deployment artifacts.
+        preserveStashes(
+            buildCount: 5
+        )
+
+        // Prevent a stuck build from running indefinitely.
+        timeout(
+            time: 30,
+            unit: 'MINUTES'
+        )
 
         buildDiscarder(
             logRotator(
@@ -28,6 +44,14 @@ pipeline {
         DASHBOARD_IMAGE = "mini-soar-dashboard:${BUILD_NUMBER}"
 
         COMPOSE_PROJECT_NAME = "mini-soar-ci-${BUILD_NUMBER}"
+
+        DEPLOY_HOST = '192.168.136.110'
+        DEPLOY_USER = 'mini-soar-deploy'
+        DEPLOY_DIR = '/opt/mini-soar'
+
+        // Used by post-failure rollback logic.
+        DEPLOY_ATTEMPTED = 'false'
+        DEPLOY_VERIFIED = 'false'
     }
 
     stages {
@@ -49,7 +73,11 @@ pipeline {
 
                     echo ""
                     echo "Commit:"
-                    git rev-parse --short HEAD
+                    git rev-parse HEAD
+
+                    echo ""
+                    echo "Branch:"
+                    git branch --show-current || true
 
                     echo ""
                     echo "Build:"
@@ -64,7 +92,7 @@ pipeline {
 
 
         // ============================================================
-        // ENVIRONMENT CHECK
+        // ENVIRONMENT
         // ============================================================
 
         stage('Environment Check') {
@@ -89,6 +117,12 @@ pipeline {
 
                     echo "========== Docker Compose =========="
                     docker compose version
+
+                    echo "========== curl =========="
+                    curl --version | head -1
+
+                    echo "========== SSH =========="
+                    ssh -V 2>&1
                 '''
             }
         }
@@ -129,7 +163,7 @@ pipeline {
                     python -m compileall src app
 
                     echo ""
-                    echo "Checking Python dependencies..."
+                    echo "Checking dependency consistency..."
 
                     python -m pip check
 
@@ -150,8 +184,6 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Installing frontend dependencies..."
-
                         npm ci
                     '''
                 }
@@ -164,8 +196,6 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "Building React dashboard..."
-
                         npm run build
 
                         echo ""
@@ -177,7 +207,7 @@ pipeline {
 
 
         // ============================================================
-        // BUILD DOCKER IMAGES
+        // BUILD TESTED DOCKER ARTIFACTS
         // ============================================================
 
         stage('Build Docker Images') {
@@ -214,20 +244,23 @@ pipeline {
                         frontend/
 
                     echo ""
-                    echo "Built Docker images:"
+                    echo "Built images:"
 
                     docker image inspect \
                         "${DEMO_WEB_IMAGE}" \
                         "${MINI_SOAR_API_IMAGE}" \
                         "${DASHBOARD_IMAGE}" \
                         --format '{{.RepoTags}} -> {{.Id}}'
+
+                    echo ""
+                    echo "Docker image build PASS"
                 '''
             }
         }
 
 
         // ============================================================
-        // VALIDATE CI COMPOSE
+        // CI COMPOSE VALIDATION
         // ============================================================
 
         stage('Validate CI Compose') {
@@ -247,7 +280,7 @@ pipeline {
 
 
         // ============================================================
-        // START CI STACK
+        // START ISOLATED CI STACK
         // ============================================================
 
         stage('Start CI Stack') {
@@ -274,7 +307,7 @@ pipeline {
 
 
         // ============================================================
-        // WAIT FOR SERVICES
+        // SERVICE READINESS
         // ============================================================
 
         stage('Wait For Services') {
@@ -396,7 +429,7 @@ pipeline {
 
 
         // ============================================================
-        // API SMOKE TESTS
+        // API INTEGRATION
         // ============================================================
 
         stage('API Smoke Tests') {
@@ -426,9 +459,9 @@ pipeline {
                     curl \
                         --fail \
                         --silent \
-                        http://127.0.0.1:19000/api/v1/remediations/summary
+                        http://127.0.0.1:19000/api/v1/remediations/summary \
+                        >/dev/null
 
-                    echo ""
                     echo "MariaDB integration PASS"
 
 
@@ -438,9 +471,9 @@ pipeline {
                     curl \
                         --fail \
                         --silent \
-                        http://127.0.0.1:18080/api/v1/remediations/summary
+                        http://127.0.0.1:18080/api/v1/remediations/summary \
+                        >/dev/null
 
-                    echo ""
                     echo "Dashboard reverse proxy PASS"
 
                     echo ""
@@ -476,10 +509,6 @@ pipeline {
                     fi
 
                     echo ""
-                    echo "Mini-SOAR API container:"
-                    echo "${API_CONTAINER}"
-
-                    echo ""
                     echo "Docker client/server compatibility:"
 
                     docker exec \
@@ -502,7 +531,7 @@ pipeline {
 
 
         // ============================================================
-        // SELF-HEALING TEST
+        // SELF-HEALING INTEGRATION TEST
         // ============================================================
 
         stage('Self-Healing Smoke Test') {
@@ -617,7 +646,7 @@ pipeline {
 
 
         // ============================================================
-        // AUDIT VERIFICATION
+        // AUDIT
         // ============================================================
 
         stage('Verify Audit Persistence') {
@@ -628,9 +657,6 @@ pipeline {
                     echo "======================================"
                     echo " Verify Audit Persistence"
                     echo "======================================"
-
-                    echo ""
-                    echo "Checking remediation record..."
 
                     result="$(
                         curl \
@@ -655,7 +681,49 @@ pipeline {
 
 
         // ============================================================
-        // PACKAGE TESTED ARTIFACTS
+        // DEPLOYMENT GATE
+        // ============================================================
+
+        stage('Deployment Gate') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo " Deployment Gate"
+                    echo "======================================"
+
+                    git fetch origin main --quiet
+
+                    CURRENT_SHA="$(git rev-parse HEAD)"
+                    MAIN_SHA="$(git rev-parse origin/main)"
+
+                    echo ""
+                    echo "Current commit:"
+                    echo "${CURRENT_SHA}"
+
+                    echo ""
+                    echo "origin/main:"
+                    echo "${MAIN_SHA}"
+
+                    if [ "${CURRENT_SHA}" != "${MAIN_SHA}" ]
+                    then
+                        echo ""
+                        echo "DEPLOYMENT BLOCKED"
+                        echo "The tested commit is not origin/main."
+
+                        exit 1
+                    fi
+
+                    echo ""
+                    echo "Deployment gate PASS"
+                '''
+            }
+        }
+
+
+        // ============================================================
+        // PACKAGE + CHECKSUM + METADATA
         // ============================================================
 
         stage('Package Deployment Artifacts') {
@@ -664,7 +732,7 @@ pipeline {
                     set -e
 
                     echo "======================================"
-                    echo " Packaging Tested Docker Images"
+                    echo " Packaging Tested Artifacts"
                     echo "======================================"
 
                     rm -rf deploy-artifacts
@@ -680,7 +748,8 @@ pipeline {
                         "${DEMO_WEB_IMAGE}" \
                         "${MINI_SOAR_API_IMAGE}" \
                         "${DASHBOARD_IMAGE}" \
-                        | gzip > deploy-artifacts/mini-soar-images.tar.gz
+                        | gzip \
+                        > deploy-artifacts/mini-soar-images.tar.gz
 
                     cp \
                         docker-compose.yml \
@@ -692,36 +761,79 @@ pipeline {
                         "DASHBOARD_IMAGE=${DASHBOARD_IMAGE}" \
                         > deploy-artifacts/.deploy.env
 
+                    (
+                        cd deploy-artifacts
+
+                        sha256sum \
+                            mini-soar-images.tar.gz \
+                            > mini-soar-images.tar.gz.sha256
+                    )
+
+                    COMMIT_SHA="$(git rev-parse HEAD)"
+                    DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+                    ARCHIVE_SHA256="$(
+                        awk '{print $1}' \
+                            deploy-artifacts/mini-soar-images.tar.gz.sha256
+                    )"
+
+                    printf '%s\n' \
+                        "BUILD_NUMBER=${BUILD_NUMBER}" \
+                        "COMMIT_SHA=${COMMIT_SHA}" \
+                        "CREATED_AT=${DEPLOYED_AT}" \
+                        "ARCHIVE_SHA256=${ARCHIVE_SHA256}" \
+                        "DEMO_WEB_IMAGE=${DEMO_WEB_IMAGE}" \
+                        "MINI_SOAR_API_IMAGE=${MINI_SOAR_API_IMAGE}" \
+                        "DASHBOARD_IMAGE=${DASHBOARD_IMAGE}" \
+                        > deploy-artifacts/deployment.env
+
                     echo ""
                     echo "Deployment artifacts:"
 
                     ls -lah deploy-artifacts/
 
                     echo ""
-                    echo "Deployment image versions:"
+                    echo "Deployment metadata:"
 
-                    cat deploy-artifacts/.deploy.env
+                    cat deploy-artifacts/deployment.env
+
+                    echo ""
+                    echo "Artifact checksum:"
+
+                    cat deploy-artifacts/mini-soar-images.tar.gz.sha256
 
                     echo ""
                     echo "Artifact packaging PASS"
                 '''
+
+                // Allows restart from Transfer Deployment Artifacts.
+                stash(
+                    name: 'deployment-artifacts',
+                    includes: 'deploy-artifacts/**,deploy-artifacts/.deploy.env',
+                    useDefaultExcludes: false
+                )
+
+                // Safe metadata only — no secrets.
+                archiveArtifacts(
+                    artifacts: 'deploy-artifacts/deployment.env',
+                    fingerprint: true
+                )
             }
         }
 
 
         // ============================================================
-        // TRANSFER TO LAB SERVER
+        // BACKUP CURRENT RELEASE + TRANSFER
         // ============================================================
 
         stage('Transfer Deployment Artifacts') {
             steps {
+                // Restores artifacts automatically when restarting this stage.
+                unstash 'deployment-artifacts'
+
                 sshagent(credentials: ['mini-soar-deploy-ssh']) {
                     sh '''
                         set -e
-
-                        DEPLOY_HOST="192.168.136.110"
-                        DEPLOY_USER="mini-soar-deploy"
-                        DEPLOY_DIR="/opt/mini-soar"
 
                         echo "======================================"
                         echo " Transfer Deployment Artifacts"
@@ -740,6 +852,40 @@ pipeline {
 
                         echo "SSH connectivity PASS"
 
+
+                        echo ""
+                        echo "Backing up current deployment metadata..."
+
+                        ssh \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -o ConnectTimeout=10 \
+                            -o ConnectionAttempts=2 \
+                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "
+                                set -e
+
+                                cd ${DEPLOY_DIR}
+
+                                if [ -f .deploy.env ]
+                                then
+                                    cp .deploy.env .deploy.env.previous
+                                fi
+
+                                if [ -f docker-compose.yml ]
+                                then
+                                    cp docker-compose.yml docker-compose.previous.yml
+                                fi
+
+                                if [ -f deployment.env ]
+                                then
+                                    cp deployment.env deployment.previous.env
+                                fi
+                            "
+
+                        echo "Previous deployment metadata backup PASS"
+
+
                         echo ""
                         echo "Transferring deployment artifacts..."
 
@@ -749,8 +895,10 @@ pipeline {
                             -o ConnectTimeout=10 \
                             -o ConnectionAttempts=2 \
                             deploy-artifacts/mini-soar-images.tar.gz \
+                            deploy-artifacts/mini-soar-images.tar.gz.sha256 \
                             deploy-artifacts/docker-compose.yml \
                             deploy-artifacts/.deploy.env \
+                            deploy-artifacts/deployment.env \
                             "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_DIR}/"
 
                         echo ""
@@ -762,18 +910,18 @@ pipeline {
 
 
         // ============================================================
-        // DEPLOY
+        // DEPLOY TESTED ARTIFACT
         // ============================================================
 
         stage('Deploy to Lab Server') {
             steps {
+                script {
+                    env.DEPLOY_ATTEMPTED = 'true'
+                }
+
                 sshagent(credentials: ['mini-soar-deploy-ssh']) {
                     sh '''
                         set -e
-
-                        DEPLOY_HOST="192.168.136.110"
-                        DEPLOY_USER="mini-soar-deploy"
-                        DEPLOY_DIR="/opt/mini-soar"
 
                         echo "======================================"
                         echo " Deploying Mini-SOAR"
@@ -794,22 +942,22 @@ pipeline {
 
                                 test -f .env
                                 test -f .deploy.env
+                                test -f deployment.env
                                 test -f docker-compose.yml
                                 test -f mini-soar-images.tar.gz
+                                test -f mini-soar-images.tar.gz.sha256
 
                                 echo 'Deployment files OK'
 
-                                echo ''
-                                echo 'Docker version:'
-                                docker --version
 
                                 echo ''
-                                echo 'Docker Compose version:'
-                                docker compose version
+                                echo 'Verifying artifact checksum...'
 
-                                echo ''
-                                echo 'Validating image archive...'
-                                gzip -t mini-soar-images.tar.gz
+                                sha256sum \
+                                    -c mini-soar-images.tar.gz.sha256
+
+                                echo 'Artifact checksum PASS'
+
 
                                 echo ''
                                 echo 'Loading tested Docker images...'
@@ -818,7 +966,8 @@ pipeline {
                                     | docker load
 
                                 echo ''
-                                echo 'Images loaded.'
+                                echo 'Docker images loaded.'
+
 
                                 echo ''
                                 echo 'Validating production Compose configuration...'
@@ -830,6 +979,7 @@ pipeline {
                                     >/dev/null
 
                                 echo 'Compose validation PASS'
+
 
                                 echo ''
                                 echo 'Starting application stack...'
@@ -861,7 +1011,7 @@ pipeline {
 
 
         // ============================================================
-        // PHASE 7.5 - POST-DEPLOYMENT VERIFICATION
+        // POST-DEPLOY VERIFICATION
         // ============================================================
 
         stage('Post-Deployment Verification') {
@@ -869,9 +1019,6 @@ pipeline {
                 sshagent(credentials: ['mini-soar-deploy-ssh']) {
                     sh '''
                         set -e
-
-                        DEPLOY_HOST="192.168.136.110"
-                        DEPLOY_USER="mini-soar-deploy"
 
                         echo "======================================"
                         echo " Post-Deployment Verification"
@@ -906,8 +1053,7 @@ pipeline {
 
                         if [ "${demo_ok}" -ne 1 ]
                         then
-                            echo ""
-                            echo "demo-web post-deployment health check FAILED"
+                            echo "demo-web health check FAILED"
 
                             ssh \
                                 -o BatchMode=yes \
@@ -952,8 +1098,7 @@ pipeline {
 
                         if [ "${api_ok}" -ne 1 ]
                         then
-                            echo ""
-                            echo "Mini-SOAR API post-deployment health check FAILED"
+                            echo "Mini-SOAR API health check FAILED"
 
                             ssh \
                                 -o BatchMode=yes \
@@ -998,8 +1143,7 @@ pipeline {
 
                         if [ "${dashboard_ok}" -ne 1 ]
                         then
-                            echo ""
-                            echo "Dashboard post-deployment health check FAILED"
+                            echo "Dashboard health check FAILED"
 
                             ssh \
                                 -o BatchMode=yes \
@@ -1033,7 +1177,7 @@ pipeline {
 
 
                         # ------------------------------------------------
-                        # API -> MariaDB
+                        # Direct API -> MariaDB
                         # ------------------------------------------------
 
                         echo ""
@@ -1050,7 +1194,7 @@ pipeline {
 
 
                         # ------------------------------------------------
-                        # VERIFY EXACT DEPLOYED IMAGE VERSIONS
+                        # Exact image version verification
                         # ------------------------------------------------
 
                         echo ""
@@ -1072,20 +1216,37 @@ pipeline {
                         echo "${REMOTE_IMAGES}"
 
                         echo "${REMOTE_IMAGES}" \
-                            | grep -q "/demo-web=${DEMO_WEB_IMAGE}"
+                            | grep -Fxq "/demo-web=${DEMO_WEB_IMAGE}"
 
                         echo "${REMOTE_IMAGES}" \
-                            | grep -q "/mini-soar-api=${MINI_SOAR_API_IMAGE}"
+                            | grep -Fxq "/mini-soar-api=${MINI_SOAR_API_IMAGE}"
 
                         echo "${REMOTE_IMAGES}" \
-                            | grep -q "/mini-soar-dashboard=${DASHBOARD_IMAGE}"
+                            | grep -Fxq "/mini-soar-dashboard=${DASHBOARD_IMAGE}"
 
-                        echo ""
                         echo "Deployed image versions PASS"
 
 
                         # ------------------------------------------------
-                        # FINAL REMOTE STATE
+                        # Deployment metadata verification
+                        # ------------------------------------------------
+
+                        echo ""
+                        echo "Verifying deployment metadata..."
+
+                        ssh \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -o ConnectTimeout=10 \
+                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "grep -Fx 'BUILD_NUMBER=${BUILD_NUMBER}' \
+                                ${DEPLOY_DIR}/deployment.env"
+
+                        echo "Deployment metadata PASS"
+
+
+                        # ------------------------------------------------
+                        # Remote state evidence
                         # ------------------------------------------------
 
                         echo ""
@@ -1108,12 +1269,57 @@ pipeline {
                         echo "======================================"
                     '''
                 }
+
+                script {
+                    env.DEPLOY_VERIFIED = 'true'
+                }
             }
         }
 
 
         // ============================================================
-        // BUILD SUMMARY
+        // SUCCESSFUL DEPLOYMENT CLEANUP
+        // ============================================================
+
+        stage('Finalize Deployment') {
+            steps {
+                sshagent(credentials: ['mini-soar-deploy-ssh']) {
+                    sh '''
+                        set +e
+
+                        echo "======================================"
+                        echo " Finalizing Deployment"
+                        echo "======================================"
+
+                        ssh \
+                            -o BatchMode=yes \
+                            -o StrictHostKeyChecking=yes \
+                            -o ConnectTimeout=10 \
+                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            "
+                                cd ${DEPLOY_DIR} || exit 0
+
+                                echo 'Removing transferred image archive...'
+
+                                rm -f \
+                                    mini-soar-images.tar.gz \
+                                    mini-soar-images.tar.gz.sha256
+
+                                echo 'Cleaning dangling Docker images...'
+
+                                docker image prune -f || true
+                            "
+
+                        echo ""
+                        echo "Deployment cleanup completed."
+                    '''
+                }
+            }
+        }
+
+
+        // ============================================================
+        // SUMMARY
         // ============================================================
 
         stage('Build Summary') {
@@ -1135,29 +1341,40 @@ pipeline {
                     echo "  TypeScript/Vite build      PASS"
 
                     echo ""
-                    echo "Docker Images:"
-                    echo "  demo-web                   PASS"
-                    echo "  Mini-SOAR API              PASS"
-                    echo "  Dashboard                  PASS"
+                    echo "Docker:"
+                    echo "  demo-web image             PASS"
+                    echo "  Mini-SOAR API image        PASS"
+                    echo "  Dashboard image            PASS"
+                    echo "  Docker control plane       PASS"
 
                     echo ""
                     echo "Integration:"
                     echo "  MariaDB                    PASS"
                     echo "  API                        PASS"
-                    echo "  Dashboard proxy            PASS"
-                    echo "  Docker control plane       PASS"
+                    echo "  Dashboard reverse proxy    PASS"
                     echo "  Self-healing               PASS"
                     echo "  Audit persistence          PASS"
 
                     echo ""
+                    echo "Security / Hardening:"
+                    echo "  Main deployment gate       PASS"
+                    echo "  Artifact SHA256            PASS"
+                    echo "  Deployment metadata        PASS"
+                    echo "  SSH host verification      PASS"
+
+                    echo ""
                     echo "Deployment:"
                     echo "  Artifact packaging         PASS"
-                    echo "  SSH transfer               PASS"
+                    echo "  Artifact stash             PASS"
+                    echo "  SSH/SCP transfer           PASS"
                     echo "  Docker image load          PASS"
                     echo "  Compose deployment         PASS"
                     echo "  Post-deploy health         PASS"
-                    echo "  Dashboard/API routing      PASS"
                     echo "  Image version verify       PASS"
+
+                    echo ""
+                    echo "Build:"
+                    echo "  ${BUILD_NUMBER}"
 
                     echo ""
                     echo "Images deployed:"
@@ -1174,16 +1391,139 @@ pipeline {
 
 
     // ================================================================
-    // CLEANUP
+    // POST ACTIONS
     // ================================================================
 
     post {
+
+        // ------------------------------------------------------------
+        // Automatic rollback
+        // ------------------------------------------------------------
+
+        failure {
+            script {
+                if (
+                    env.DEPLOY_ATTEMPTED == 'true' &&
+                    env.DEPLOY_VERIFIED != 'true'
+                ) {
+                    echo 'Deployment failure detected. Attempting rollback...'
+
+                    sshagent(credentials: ['mini-soar-deploy-ssh']) {
+                        sh '''
+                            set +e
+
+                            echo "======================================"
+                            echo " Automatic Rollback"
+                            echo "======================================"
+
+                            ssh \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=yes \
+                                -o ConnectTimeout=10 \
+                                -o ConnectionAttempts=2 \
+                                "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                                "
+                                    set -e
+
+                                    cd ${DEPLOY_DIR}
+
+                                    if [ ! -f .deploy.env.previous ] || \
+                                       [ ! -f docker-compose.previous.yml ]
+                                    then
+                                        echo 'Rollback unavailable:'
+                                        echo 'No previous deployment metadata exists.'
+                                        exit 2
+                                    fi
+
+                                    echo ''
+                                    echo 'Previous release:'
+
+                                    cat .deploy.env.previous
+
+                                    echo ''
+                                    echo 'Restoring previous Docker Compose configuration...'
+
+                                    docker compose \
+                                        --env-file .deploy.env.previous \
+                                        -f docker-compose.previous.yml \
+                                        up -d \
+                                        --no-build
+
+                                    cp \
+                                        .deploy.env.previous \
+                                        .deploy.env
+
+                                    cp \
+                                        docker-compose.previous.yml \
+                                        docker-compose.yml
+
+                                    if [ -f deployment.previous.env ]
+                                    then
+                                        cp \
+                                            deployment.previous.env \
+                                            deployment.env
+                                    fi
+
+                                    echo ''
+                                    echo 'Waiting briefly for rollback services...'
+
+                                    sleep 10
+
+                                    echo ''
+                                    echo 'Rollback stack:'
+
+                                    docker compose \
+                                        --env-file .deploy.env \
+                                        -f docker-compose.yml \
+                                        ps
+
+                                    echo ''
+                                    echo 'ROLLBACK COMPLETED'
+                                "
+
+                            ROLLBACK_RC=$?
+
+                            if [ "${ROLLBACK_RC}" -eq 0 ]
+                            then
+                                echo ""
+                                echo "Automatic rollback completed successfully."
+                            else
+                                echo ""
+                                echo "WARNING: automatic rollback failed."
+                                echo "Rollback exit code: ${ROLLBACK_RC}"
+                                echo "Manual recovery may be required."
+                            fi
+
+                            // Preserve original pipeline failure.
+                            exit 0
+                        '''
+                    }
+                } else {
+                    echo 'Rollback not required.'
+                    echo "DEPLOY_ATTEMPTED=${env.DEPLOY_ATTEMPTED}"
+                    echo "DEPLOY_VERIFIED=${env.DEPLOY_VERIFIED}"
+                }
+            }
+
+            echo 'Mini-SOAR CI/CD pipeline FAILED. Check the failed stage above.'
+        }
+
+
+        // ------------------------------------------------------------
+        // Jenkins CI cleanup
+        // ------------------------------------------------------------
+
         always {
             sh '''
+                set +e
+
                 echo ""
                 echo "======================================"
-                echo " Cleaning CI Stack"
+                echo " Cleaning Jenkins CI Environment"
                 echo "======================================"
+
+                echo ""
+                echo "Stopping isolated CI stack..."
 
                 docker compose \
                     -f docker-compose.ci.yml \
@@ -1192,8 +1532,42 @@ pipeline {
                     --remove-orphans \
                     || true
 
+
+                echo ""
+                echo "Removing build-specific CI images..."
+
+                docker image rm \
+                    "${DEMO_WEB_IMAGE}" \
+                    "${MINI_SOAR_API_IMAGE}" \
+                    "${DASHBOARD_IMAGE}" \
+                    2>/dev/null \
+                    || true
+
+
+                echo ""
+                echo "Removing dangling images..."
+
+                docker image prune -f || true
+
+
+                echo ""
+                echo "Removing Docker builder cache older than 7 days..."
+
+                docker builder prune \
+                    -f \
+                    --filter 'until=168h' \
+                    || true
+
+
+                echo ""
+                echo "Removing temporary files..."
+
                 rm -rf .jenkins-venv || true
                 rm -rf deploy-artifacts || true
+
+
+                echo ""
+                echo "Jenkins cleanup completed."
             '''
 
             cleanWs(
@@ -1202,12 +1576,9 @@ pipeline {
             )
         }
 
+
         success {
             echo 'Mini-SOAR full-stack CI/CD pipeline completed successfully.'
-        }
-
-        failure {
-            echo 'Mini-SOAR CI/CD pipeline FAILED. Check the failed stage above.'
         }
     }
 }
