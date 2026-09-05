@@ -11,6 +11,9 @@ pipeline {
             )
         )
     }
+    triggers {
+        pollSCM('H/2 * * * *')
+    }
 
     environment {
         PIP_DISABLE_PIP_VERSION_CHECK = '1'
