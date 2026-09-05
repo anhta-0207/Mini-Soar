@@ -11,3 +11,10 @@ docs/
 .vscode/
 .idea/
 *.log
+
+# Frontend generated files
+frontend/node_modules/
+frontend/dist/
+
+# Jenkins temporary files
+.jenkins-venv/
