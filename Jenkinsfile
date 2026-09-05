@@ -321,6 +321,43 @@ pipeline {
             }
         }
 
+	stage('Docker Control Plane Check') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo " Docker control plane compatibility"
+                    echo "======================================"
+
+                    API_CONTAINER="$(
+                        docker compose \
+                            -f docker-compose.ci.yml \
+                            ps -q mini-soar-api
+                    )"
+
+                    test -n "${API_CONTAINER}"
+
+                    echo "Docker client/server compatibility:"
+ 
+                    docker exec \
+                        "${API_CONTAINER}" \
+                        docker version
+
+                    echo ""
+                    echo "Verifying demo-web visibility:"
+
+                    docker exec \
+                        "${API_CONTAINER}" \
+                        docker inspect demo-web \
+                        --format 'running={{.State.Running}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+
+                    echo ""
+                    echo "Docker control plane check PASS"
+                '''
+            }
+        }   
+
         stage('Self-Healing Smoke Test') {
             steps {
                 sh '''
