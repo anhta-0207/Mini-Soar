@@ -16,7 +16,9 @@ No password, token, private key, or other credential belongs in this document.
 | Mini-SOAR API | `192.168.136.110:9000` | Webhook ingestion, process health, and remediation history API |
 | MariaDB | Local to the monitored host | Stores the `mini_soar.remediation_history` audit table |
 | Dashboard development server | Port `5173` | Serves the Vite UI and proxies backend requests during development |
+| Deployed dashboard | `192.168.136.110:8080` | Serves the React build through Nginx and proxies `/api` |
 | Discord Webhook | External, configured by environment | Receives selected remediation outcome notifications |
+| Jenkins | Agent label `ci` | Runs validation, integration tests, and SSH/SCP lab deployment |
 
 These private addresses describe the current lab and should be adjusted for another environment.
 
@@ -28,6 +30,7 @@ These private addresses describe the current lab and should be adjusted for anot
 - Node.js and npm for the frontend
 - Zabbix Server and Zabbix Agent 2 for monitoring and event delivery
 - Outbound access to the configured Discord webhook when notifications are enabled
+- Jenkins with Git, Python, Node.js/npm, Docker Compose, curl, SSH/SCP, and Workspace Cleanup support
 
 ## Development Ports
 
@@ -36,6 +39,9 @@ These private addresses describe the current lab and should be adjusted for anot
 | `8000` | `demo-web` workload | Root `Dockerfile` and Uvicorn command |
 | `9000` | Mini-SOAR FastAPI backend | Backend launch command and Vite proxy target |
 | `5173` | Vite dashboard development server | `frontend/vite.config.ts` |
+| `8080` | Deployed Nginx dashboard | `docker-compose.yml` |
+
+The temporary Jenkins CI stack uses host ports `18000` (workload), `19000` (API), and `18080` (dashboard) to avoid the normal lab ports.
 
 ## Runtime Components
 
@@ -115,6 +121,20 @@ The development request flow is:
 Browser -> Vite :5173 -> /api proxy -> FastAPI :9000 -> MariaDB
 ```
 
+### Containerized Lab Stack
+
+`docker-compose.yml` runs the deployment configuration:
+
+| Container | Runtime |
+|---|---|
+| `demo-web` | Image from `DEMO_WEB_IMAGE`, published on `8000` |
+| `mini-soar-api` | Image from `MINI_SOAR_API_IMAGE`, host networking, `.env`, and Docker socket mount |
+| `mini-soar-dashboard` | Image from `DASHBOARD_IMAGE`, Nginx on `8080`, API upstream through the host gateway |
+
+The API image includes Docker CLI but does not run its own Docker daemon. It controls the host engine through `/var/run/docker.sock`. MariaDB remains host-local in the deployment configuration.
+
+The deployed dashboard health endpoint is `/healthz`; its Nginx configuration proxies `/api/` to the Mini-SOAR API and serves the React single-page application for other paths.
+
 ## Environment Variables
 
 Copy the placeholder file and set local values without committing them:
@@ -144,7 +164,7 @@ Keep notifications disabled until a local webhook has been configured:
 
 ```env
 NOTIFICATIONS_ENABLED=false
-DISCORD_WEBHOOK_URL=your_discord_webhook_url
+DISCORD_WEBHOOK_URL=
 ```
 
 Do not store or print a real Discord webhook URL in documentation, logs, screenshots, or committed files. The tracked `.env.example` contains placeholders only; real values belong in the ignored `.env` file.
@@ -176,8 +196,15 @@ The required lab paths are:
 | Mini-SOAR | Local Docker daemon | Inspect, start, restart, and verify `demo-web` |
 | Mini-SOAR | Local MariaDB TCP `3306` | Persist and query remediation history |
 | Mini-SOAR | Configured Discord webhook | Send outbound `SUCCESS`, `FAILED`, and `ERROR` outcome notifications |
+| Jenkins `ci` agent | `mini-soar-deploy@192.168.136.110` over SSH/SCP | Transfer and deploy tested artifacts |
 
 Firewall rules should expose only the paths required by the lab.
+
+## Jenkins Deployment Environment
+
+The `Jenkinsfile` deploys to `/opt/mini-soar` on `192.168.136.110` using the dedicated `mini-soar-deploy` account and Jenkins credential ID `mini-soar-deploy-ssh`. The CI node must already trust the target host key because every SSH/SCP command enables `StrictHostKeyChecking=yes`.
+
+The target must retain its own `.env`; Jenkins checks that it exists but never transfers it. Jenkins supplies only non-secret image/version metadata and the Compose file. The deployment account must be authorized to run Docker commands. See [Lab Deployment](deployment.md) for artifacts, verification, and rollback.
 
 ## Verification Commands
 
@@ -200,6 +227,8 @@ Open `http://192.168.136.110:9000/docs` from a browser that can reach the lab ne
 
 With both development servers running, open `http://localhost:5173` and confirm that the dashboard reports `Operational`, renders summary/distribution data, and lists recent remediations. The indicator is based on the dashboard's API requests rather than a dedicated `/health` poll.
 
+For the Compose deployment, use `http://192.168.136.110:8080` and verify `http://192.168.136.110:8080/healthz`.
+
 To verify Phase 6, keep the webhook value in the local `.env`, set `NOTIFICATIONS_ENABLED=true`, restart the backend so configuration is reloaded, and trigger a controlled container remediation. Confirm that a Discord embed contains the event type, service, status, action, host, duration, and details. A `SKIPPED` duplicate, cooldown, or in-progress decision should remain in the audit trail without producing a Discord notification.
 
 ## Runtime Data
@@ -209,10 +238,13 @@ To verify Phase 6, keep the webhook value in the local `.env`, set `NOTIFICATION
 - Local environment values: `.env`
 - Frontend dependency cache: `frontend/node_modules/`
 - Frontend build output: `frontend/dist/`
+- Jenkins temporary virtual environment: `.jenkins-venv/`
+- Jenkins local packaging directory: `deploy-artifacts/`
+- Remote release metadata: `/opt/mini-soar/.deploy.env` and `/opt/mini-soar/deployment.env`
 
 Notification delivery results are logged but are not stored in a separate persistent notification table or queue.
 
-The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `logs/`, `frontend/node_modules/`, and `frontend/dist/` paths are ignored by Git.
+The `.env`, virtual environments, Python caches, logs, frontend dependencies/builds, `.jenkins-venv/`, and `deploy-artifacts/` paths are ignored by Git.
 
 ## Current Limitations
 
@@ -222,8 +254,10 @@ The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `logs/`, `frontend/node_modules/`
 - The current allowlist supports only `demo-web`.
 - MariaDB must be reachable for history API queries.
 - The dashboard is read-only; it does not provide browser-triggered remediation.
-- The repository has frontend source and development/build tooling but no production dashboard hosting configuration.
+- The repository includes Nginx dashboard hosting for the lab but no TLS, authentication, or production hardening.
 - Discord notifications are disabled by default and require a locally configured webhook plus outbound connectivity.
 - Notification delivery is synchronous with a five-second timeout and has no retry, durable queue, or acknowledgement workflow.
 - Notification failure is isolated from remediation, but delivery status is not persisted separately.
-- Jenkins and durable worker components are not implemented.
+- Jenkins deploys directly over SSH/SCP; there is no registry, environment promotion, image signing, or SBOM.
+- Rollback requires previous metadata and retained image tags and does not repeat full post-rollback health verification.
+- Durable remediation worker components are not implemented.

@@ -27,6 +27,12 @@ flowchart LR
         E --> F --> G
     end
 
+    subgraph Delivery[Jenkins CI/CD]
+        N[GitHub origin/main]
+        O[Jenkins agent - label ci]
+        N -->|SCM polling| O
+    end
+
     C --> E
     G --> D
     D --> H[(MariaDB)]
@@ -35,6 +41,7 @@ flowchart LR
     J --> K[Vite dev proxy :5173]
     K --> L[React and TypeScript dashboard]
     D --> M[Discord webhook notifications]
+    O -->|SSH/SCP tested artifacts| B
 ```
 
 The monitored host and Mini-SOAR engine currently share access to the local Docker daemon. That access is highly privileged and is a deliberate lab boundary.
@@ -53,6 +60,10 @@ MariaDB -> read-only FastAPI endpoints -> Vite development proxy
 Notification plane
 Audited SUCCESS / FAILED / ERROR -> RemediationNotifier
         -> NotificationService -> Discord webhook
+
+Delivery plane
+GitHub -> Jenkins SCM polling -> isolated CI stack -> deployment gate
+        -> tested image archive -> SSH/SCP -> lab Docker Compose
 ```
 
 The dashboard belongs to the observability plane. Its source calls only remediation `GET` endpoints; it cannot invoke a playbook, start or restart a container, or execute a shell command. Discord is an outbound notification channel with no route back into remediation. The Zabbix webhook is the only application entry point to the automation plane.
@@ -70,6 +81,7 @@ The dashboard belongs to the observability plane. Its source calls only remediat
 | REST API | `api/remediations.py` | Serve read-only history, summary, distribution, and detail data |
 | Dashboard | React, TypeScript, Vite | Present remediation observability without control-plane actions |
 | Notification | `RemediationNotifier`, `NotificationService`, Discord Webhook | Deliver selected remediation outcomes without propagating delivery failures |
+| CI/CD | `Jenkinsfile`, `docker-compose.ci.yml`, deployment Compose | Validate, integration-test, package, transfer, deploy, verify, and conditionally roll back tested images |
 
 ## Mini-SOAR Internal Flow
 
@@ -120,6 +132,10 @@ flowchart TD
 | `frontend/src/services/api.ts` | Calls the list, summary, and distribution endpoints through relative `/api/v1` URLs |
 | `frontend/src/pages/Dashboard.tsx` | Coordinates filters, loading/error state, manual refresh, and 15-second auto-refresh |
 | `frontend/src/components/` | Renders KPI cards, distribution charts, and the remediation history table |
+| `frontend/Dockerfile`, `frontend/nginx/` | Build the React assets and serve them through Nginx with `/api` reverse proxying |
+| `docker-compose.yml` | Defines the three-container lab deployment and image-tag inputs |
+| `docker-compose.ci.yml` | Defines the temporary MariaDB/application stack used for integration tests |
+| `Jenkinsfile` | Implements SCM polling, validation, integration tests, artifact delivery, post-deploy checks, rollback, and cleanup |
 
 ## Package Boundaries
 
@@ -234,6 +250,14 @@ The API uses parameterized SQL for values and exposes MariaDB failures as HTTP `
 
 The operational indicator reflects the combined dashboard data requests; it does not independently poll the backend `/health` endpoint.
 
+### CI/CD Flow
+
+Jenkins runs on the `ci` agent and checks Git through two-minute SCM polling. It compiles the Python source, builds the React application, and builds three build-numbered images. `docker-compose.ci.yml` then provides an isolated MariaDB/application stack for service readiness, API, reverse-proxy, Docker socket, synthetic self-healing, and audit-persistence checks.
+
+After CI succeeds, a gate requires the tested commit to equal `origin/main`. Jenkins packages the exact tested images with `docker save | gzip`, generates SHA256 and release metadata, then uses SSH/SCP to transfer them to `mini-soar-deploy@192.168.136.110:/opt/mini-soar`. The host verifies the checksum, runs `docker load`, and starts `docker-compose.yml` with `--no-build`.
+
+Post-deployment checks cover all service health endpoints, dashboard API proxying, API database access, exact image tags, and build metadata. A failed deployment attempt before verification triggers restoration of previous Compose/image-tag metadata when available. See [CI/CD Pipeline](ci-cd.md) and [Lab Deployment](deployment.md).
+
 ## Safety Boundaries
 
 - `DockerService` permits only `demo-web` by default.
@@ -249,6 +273,8 @@ The operational indicator reflects the combined dashboard data requests; it does
 - Discord receives outbound result messages only and cannot trigger remediation.
 - The Discord webhook URL is loaded from the environment rather than embedded in source or documentation.
 - Notification delivery is attempted only for `SUCCESS`, `FAILED`, and `ERROR`; notifier exceptions are contained.
+- Jenkins deploys only when the tested SHA equals `origin/main`, verifies the transferred archive checksum, and uses SSH host-key checking.
+- Deployment uses build-numbered images already exercised by CI and Compose `--no-build` on the target.
 
 ## Runtime and Failure Behavior
 
@@ -260,10 +286,12 @@ The operational indicator reflects the combined dashboard data requests; it does
 - Remediation API data is not access-controlled; the read-only UI prevents actions but does not provide confidentiality.
 - The Python webhook handler does not enforce the `managed_by` tag; Zabbix Action filtering, network restriction, and the Docker allowlist are the current boundaries.
 - There is no durable queue, retry scheduler, distributed lock, or circuit breaker.
-- The repository contains the frontend source and development proxy configuration, but no production static-hosting configuration.
+- The lab deployment serves the built dashboard through Nginx on host port `8080`; the supplied configuration does not add TLS or authentication.
 - Notifications are disabled by default and require a locally configured Discord webhook.
 - Notification delivery is synchronous, has a five-second HTTP timeout, and has no retry or durable queue.
 - Discord failure does not propagate into remediation, but delivery success is not persisted as a separate notification record.
+- Deployment is a direct SSH/SCP lab workflow without a registry, signed images, SBOM, or environment promotion model.
+- Rollback depends on retained image tags and previous metadata and does not repeat the full post-deployment verification suite.
 
 These are documented constraints and candidates for later hardening, not capabilities claimed by the current implementation.
 
@@ -277,4 +305,6 @@ These are documented constraints and candidates for later hardening, not capabil
 | 4 | Guarded remediation, verification, audit, persistence, and history API | Complete |
 | 5 | Read-only React/TypeScript security operations dashboard | Complete |
 | 6 | Discord remediation outcome notifications | Complete |
-| Future | CI/CD and additional hardening | Planned |
+| CI/CD | Jenkins validation, integration testing, lab deployment, and rollback | Complete |
+| Current | Portfolio documentation and evidence | In progress |
+| Future | Additional security hardening and deployment maturity | Planned |

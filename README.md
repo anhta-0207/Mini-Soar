@@ -4,11 +4,11 @@
 
 ## Overview
 
-Mini-SOAR is an isolated DevOps and security automation lab that connects Zabbix detection to guarded Docker remediation, recovery verification, an auditable incident history, REST APIs, a read-only security operations dashboard, and Discord outcome notifications.
+Mini-SOAR is an isolated DevOps and security automation lab that connects Zabbix detection to guarded Docker remediation, recovery verification, an auditable incident history, REST APIs, a read-only security operations dashboard, Discord outcome notifications, and Jenkins-driven lab delivery.
 
 The project demonstrates a deliberately narrow SOAR workflow for a single monitored workload. It is a portfolio project, not a replacement for an enterprise SOAR platform and not production-ready infrastructure.
 
-Phases 1 through 6 are implemented:
+The implemented scope includes:
 
 - Linux and Docker workload infrastructure
 - Zabbix monitoring and detection
@@ -16,6 +16,7 @@ Phases 1 through 6 are implemented:
 - Automated container remediation, verification, audit persistence, and history APIs
 - A read-only React and TypeScript security operations dashboard
 - Discord notifications for attempted remediation outcomes
+- Jenkins CI, full-stack integration tests, and direct lab deployment with post-deployment verification and conditional rollback
 
 ## Key Features
 
@@ -32,50 +33,44 @@ Phases 1 through 6 are implemented:
 - React and TypeScript dashboard with KPIs, filters, analytics, and refresh controls
 - Discord webhook notifications for `SUCCESS`, `FAILED`, and `ERROR` remediation outcomes
 - Notification failure isolation from the remediation pipeline
+- Three build-numbered Docker images and Compose-based CI/deployment stacks
+- Jenkins SCM polling, backend validation, frontend build, API smoke tests, and self-healing integration tests
+- Build-once deployment of the tested images with SHA256 verification and `docker compose --no-build`
+- Post-deployment health/image checks and automatic metadata-based rollback on deployment failure
 - Controlled Bash scripts for repeatable failure injection
 - Unit coverage for the remediation guard
 
 ## Architecture
 
-```text
-Automation / control plane
+```mermaid
+flowchart LR
+    subgraph Runtime[Event-driven runtime]
+        A[demo-web] --> B[Zabbix Agent 2]
+        B --> C[Zabbix Server]
+        C --> D[Trigger and Action]
+        D -->|Webhook| E[FastAPI]
+        E --> F[Event Parser]
+        F --> G[Event Router]
+        G --> H[Remediation Guard]
+        H --> I[Playbook]
+        I --> J[DockerService]
+        J --> K[Docker Engine]
+        K --> L[Verification]
+        L --> M[AuditService]
+        M --> N[(JSONL)]
+        M --> O[(MariaDB)]
+        M --> P[RemediationNotifier]
+        P --> Q[Discord Webhook]
+        O --> R[Remediation REST API]
+        R --> S[Nginx and React dashboard]
+    end
 
-demo-web -> Zabbix Agent 2 -> Zabbix Server -> Trigger -> Action
-                                                        |
-                                                        v
-                                              FastAPI webhook
-                                                        |
-                                                        v
-                                      Parser -> Router -> Guard
-                                                        |
-                                                        v
-                                    Playbooks -> DockerService
-                                                        |
-                                                        v
-                                     demo-web -> Verification
-                                                        |
-                                                        v
-                                                Release guard
-                                                        |
-                                                        v
-                                                  AuditService
-                                                        |
-                                                        v
-                                        JSONL write + MariaDB attempt
-                                                        |
-                                                        v
-                                             RemediationNotifier
-                                                        |
-                                                        v
-                                            NotificationService
-                                                        |
-                                                        v
-                                               Discord webhook
-
-Observability plane
-
-MariaDB -> FastAPI remediation APIs -> Vite development proxy
-                                      -> React/TypeScript dashboard
+    subgraph Delivery[Jenkins CI/CD]
+        T[GitHub] -->|SCM polling| U[Jenkins agent]
+        U --> V[Temporary CI stack]
+        V --> W[Tested image archive and SHA256]
+        W -->|SSH and SCP| X[Lab Docker Compose]
+    end
 ```
 
 The dashboard is separate from the automation path. It reads persisted remediation data and has no control that starts or restarts a container, invokes a playbook, or executes a shell command. Discord is an external, outbound notification channel and cannot control remediation.
@@ -84,19 +79,39 @@ The webhook route executes synchronously in the current implementation. `RECOVER
 
 See [the technical architecture](docs/architecture.md) for component boundaries, detailed data flows, and current limitations.
 
-## Tech Stack
+## Technology Stack
 
 | Area | Technology |
 |---|---|
-| Host and workload | Linux, Docker |
-| Monitoring and detection | Zabbix Server, Zabbix Agent 2 |
+| Monitoring | Zabbix Server, Zabbix Agent 2 |
 | Backend | Python, FastAPI, Pydantic, Uvicorn/Gunicorn |
-| Remediation | Python subprocess argument lists, Docker CLI |
-| Persistence | JSONL, MariaDB, PyMySQL |
-| Dashboard | React, TypeScript, Vite |
+| Frontend | React, TypeScript, Vite |
+| Database | MariaDB, PyMySQL, JSONL audit |
+| Containerization | Docker, Docker Compose, Docker CLI |
+| CI/CD | Jenkins declarative pipeline, Git SCM polling, SSH/SCP |
+| Web server | Nginx for the deployed dashboard and API proxy |
 | Notifications | Discord Webhook |
-| Failure simulation | Bash, curl |
-| Source control | Git, GitHub |
+| OS / infrastructure | Linux lab hosts, Bash, Git/GitHub |
+
+## Event Flow
+
+```mermaid
+sequenceDiagram
+    participant Z as Zabbix
+    participant A as FastAPI
+    participant R as Parser and Router
+    participant G as RemediationGuard
+    participant D as DockerService
+    participant P as Audit and Notification
+
+    Z->>A: POST /api/v1/webhooks/zabbix
+    A->>R: Validate and normalize event
+    R->>G: Route container PROBLEM
+    G->>D: Allow start or restart
+    D->>D: Verify running and health
+    D->>P: Audit outcome, then notify when eligible
+    A-->>Z: Accepted response after synchronous routing
+```
 
 ## Event Types
 
@@ -110,7 +125,7 @@ The `HIGH_CPU` policy is deliberately conservative. High CPU alone does not prov
 
 Trigger expressions and required event tags are documented in [zabbix/triggers.md](zabbix/triggers.md).
 
-## Automated Remediation
+## Self-Healing Workflow
 
 For container `PROBLEM` events, the router calls the container recovery playbook:
 
@@ -141,6 +156,8 @@ The playbook records `SUCCESS`, `FAILED`, or `ERROR` for attempted remediation. 
 - Secrets are loaded from environment variables and belong in the ignored `.env` file.
 
 These controls reduce risk inside the lab; they do not replace host isolation, least-privilege Docker access, webhook authentication, or a durable job system.
+
+See [Self-Healing Workflows](docs/self-healing.md) for event-specific sequences, guard semantics, outcomes, and limitations.
 
 ## Remediation Guard
 
@@ -274,7 +291,46 @@ React/TypeScript dashboard
 
 During development, Vite proxies `/api` and `/health` to `http://127.0.0.1:9000`. The dashboard data service uses the `/api/v1` routes. The proxy is development convenience, not an authentication or authorization boundary.
 
-## Fault Injection / Demo
+## CI/CD Pipeline
+
+Jenkins runs the repository pipeline on an agent labeled `ci` and detects revisions with SCM polling approximately every two minutes. It does not use a GitHub webhook.
+
+```mermaid
+flowchart LR
+    A[Checkout] --> B[Backend validation]
+    B --> C[Frontend build]
+    C --> D[Build three images]
+    D --> E[Temporary CI Compose stack]
+    E --> F[API and Docker checks]
+    F --> G[Self-healing and audit test]
+    G --> H{Tested SHA equals origin/main?}
+    H -->|No| I[Block deployment]
+    H -->|Yes| J[docker save and gzip]
+    J --> K[SHA256 and metadata]
+    K --> L[Stash and SCP]
+    L --> M[docker load]
+    M --> N[Compose up --no-build]
+    N --> O[Post-deployment verification]
+    O -->|Failure before verification| P[Restore previous release metadata]
+```
+
+The CI stack exposes `demo-web`, the API, and dashboard on `18000`, `19000`, and `18080`, with a temporary MariaDB service and notifications disabled. It validates OpenAPI, database access, Nginx proxying, Docker socket compatibility, a synthetic `CONTAINER_DOWN` recovery, and persisted `SUCCESS/action=start` audit data.
+
+The three build-numbered images are built once, tested, packaged into one archive, verified with SHA256 on the target, loaded, and deployed without rebuilding. See [CI/CD Pipeline](docs/ci-cd.md) for the exact 21-stage order and cleanup behavior.
+
+## Deployment Architecture
+
+Jenkins transfers artifacts over SSH/SCP as `mini-soar-deploy` to the lab host `192.168.136.110:/opt/mini-soar`. The deployment host keeps its own `.env`; Jenkins transfers only the image archive, checksum, Compose file, image-tag file, and non-secret release metadata.
+
+The deployed Compose stack contains:
+
+- `demo-web` on port `8000`;
+- `mini-soar-api` on host networking at port `9000`, with the Docker socket mounted;
+- `mini-soar-dashboard` served by Nginx on port `8080` with `/api` reverse proxying.
+
+Post-deployment checks cover service health, API/database access, reverse proxying, exact image tags, and build metadata. If deployment has started but verification has not completed, Jenkins attempts to restore the previous Compose and image-tag metadata with `--no-build`. See [Lab Deployment](docs/deployment.md) for prerequisites and rollback limits.
+
+## Demo Scenario
 
 > **For isolated lab/demo use only.** Do not expose or copy these simulation mechanisms into production workloads.
 
@@ -292,6 +348,8 @@ The workload also exposes `POST /simulate/unhealthy`, `POST /simulate/recover`, 
 The unhealthy simulation is in memory. Restarting the workload process resets it; the current implementation does not use a `/tmp/force_unhealthy` flag.
 
 See [scripts/README.md](scripts/README.md) for prerequisites, recovery guidance, and expected results.
+
+For a recruiter-friendly 3-5 minute walkthrough, including the CI/CD evidence sequence, see [Demo Runbook](docs/demo.md).
 
 ## Tests
 
@@ -312,14 +370,25 @@ mini-soar/
 |   `-- schema.sql                    # MariaDB audit schema
 |-- docs/
 |   |-- architecture.md
+|   |-- ci-cd.md
+|   |-- demo.md
+|   |-- deployment.md
 |   |-- environment.md
+|   |-- security.md
+|   |-- self-healing.md
 |   `-- images/                       # real lab evidence
+|-- docker/
+|   |-- demo-web.Dockerfile
+|   `-- mini-soar.Dockerfile
 |-- frontend/
 |   |-- src/
 |   |   |-- components/               # cards, charts, and history table
 |   |   |-- pages/                    # dashboard and refresh state
 |   |   |-- services/                 # REST API client
 |   |   `-- types/                    # API response types
+|   |-- Dockerfile                    # multi-stage Vite/Nginx image
+|   |-- nginx/
+|   |   `-- default.conf.template     # SPA and /api reverse proxy
 |   |-- package.json
 |   `-- vite.config.ts
 |-- scripts/
@@ -344,7 +413,9 @@ mini-soar/
 |-- .dockerignore
 |-- .env.example
 |-- .gitignore
-|-- Dockerfile
+|-- docker-compose.ci.yml             # isolated CI integration stack
+|-- docker-compose.yml                # deployed lab stack
+|-- Jenkinsfile                       # build, test, deploy, and rollback
 |-- LICENSE
 |-- README.md
 `-- requirements.txt
@@ -371,7 +442,7 @@ Copy `.env.example` to the ignored `.env` file and provide local values. The bac
 - `DB_USER`
 - `DB_PASSWORD`
 
-Phase 6 adds:
+Notification configuration uses:
 
 | Variable | Purpose |
 |---|---|
@@ -382,7 +453,7 @@ Safe disabled configuration:
 
 ```env
 NOTIFICATIONS_ENABLED=false
-DISCORD_WEBHOOK_URL=your_discord_webhook_url
+DISCORD_WEBHOOK_URL=
 ```
 
 Do not commit a real Discord webhook URL. When notifications are disabled or the URL is not configured, the service returns a non-success result and remediation continues.
@@ -416,7 +487,7 @@ Open `http://localhost:5173`. Build the static assets with:
 npm run build
 ```
 
-The repository does not currently define production hosting for the generated `frontend/dist/` assets.
+The deployed dashboard image builds the Vite assets and serves them through Nginx. Its `/api/` location proxies to the Mini-SOAR API, while `/healthz` supports service verification.
 
 ## API and Dashboard Development Flow
 
@@ -424,7 +495,7 @@ The repository does not currently define production hosting for the generated `f
 Browser -> Vite :5173 -> /api proxy -> FastAPI :9000 -> MariaDB
 ```
 
-## Demo Evidence
+## Screenshots
 
 ### Phase 6 Discord notification
 
@@ -460,10 +531,33 @@ The unhealthy-container scenario shows `docker restart`, health polling, `SUCCES
 
 Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), including Docker discovery, trigger incidents, webhook configuration, routing, and recovery events.
 
+### Jenkins CI/CD
+
+The two captures below show the left and right halves of successful Jenkins build `#16`, including validation, integration testing, deployment, post-deployment verification, and finalization.
+
+![Jenkins CI foundation stages](docs/images/24-jenkins-ci-foundation.png)
+
+![Jenkins deployment and final pipeline stages](docs/images/25-jenkins-final-pipelines.png)
+
+### Deployment state
+
+The deployment evidence shows all three build `#16` images running healthy and the corresponding non-secret release metadata.
+
+![Healthy production lab containers](docs/images/26-production-containers.png)
+
+![Deployment build and image metadata](docs/images/27-deployment-metadata.png)
+
+See the [Demo Runbook](docs/demo.md) for the complete evidence checklist and capture guidance.
+
 ## Documentation
 
 - [Technical architecture](docs/architecture.md)
+- [Self-healing design](docs/self-healing.md)
+- [CI/CD pipeline](docs/ci-cd.md)
+- [Lab deployment](docs/deployment.md)
 - [Lab environment](docs/environment.md)
+- [Security model and limitations](docs/security.md)
+- [Demo runbook and evidence checklist](docs/demo.md)
 - [Failure simulation](scripts/README.md)
 - [Zabbix monitoring and webhook flow](zabbix/README.md)
 - [Zabbix detection rules](zabbix/triggers.md)
@@ -480,11 +574,15 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 - Discord is an outbound notification channel only and has no remediation control path.
 - The Discord webhook is read from the ignored local environment and must not be committed.
 - Notification failures are contained and cannot overwrite a completed remediation result.
+- Jenkins deploys only when the tested commit exactly matches `origin/main`, verifies the artifact checksum, and reuses the tested image archives with `--no-build`.
+- SSH deployment uses a dedicated lab account, stored Jenkins credentials, batch mode, and strict host-key checking.
 - The Python webhook handler consumes `event_type` and `service` tags but does not enforce `managed_by`; intended-event filtering must be applied in Zabbix and at the network boundary.
 - The webhook and remediation history APIs currently have no authentication or authorization.
-- Docker daemon access is highly privileged, and this lab architecture is not hardened production infrastructure.
+- Docker socket access and deploy-account membership in the Docker group are effectively host-level privileges. This lab architecture is not hardened production infrastructure.
 
-## Roadmap
+See [Security Model and Limitations](docs/security.md) for trust boundaries, secret-handling guidance, and residual risks.
+
+## Future Improvements
 
 ### Completed
 
@@ -496,13 +594,16 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 - Remediation REST APIs
 - Read-only React/TypeScript security operations dashboard
 - Discord remediation outcome notifications with failure isolation
+- Jenkins validation, integration tests, immutable artifact transfer, lab deployment, post-deployment verification, and conditional rollback
 
-### Planned
+### Candidate hardening
 
-- Jenkins CI/CD
 - Webhook/API authentication and authorization
 - Durable workers, persistent guard state, retry/backoff, and circuit breaking
+- A private image registry, image signing, SBOM generation, and vulnerability policy gates
+- Managed secrets, TLS, network segmentation, and a restricted Docker control plane
 - Broader automated tests and production-oriented observability
+- Orchestrated deployment with stronger rollback verification and high availability
 
 ## Project Status
 
@@ -514,5 +615,11 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 | Phase 4 | Automated remediation, verification, audit, persistence, and REST API | Complete |
 | Phase 5 | Read-only security operations dashboard | Complete |
 | Phase 6 | Discord remediation outcome notifications | Complete |
-| Future | CI/CD and additional hardening | Planned |
+| Phase 7 | Jenkins CI/CD, lab deployment, verification, and rollback | Complete |
+| Phase 7.7 | Documentation and portfolio evidence | Complete |
+| Future | Production hardening and platform expansion | Planned |
+
+## Author
+
+Maintained by [anhta-0207](https://github.com/anhta-0207) as a DevOps and security automation portfolio project.
 
