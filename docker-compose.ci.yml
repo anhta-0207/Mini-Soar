@@ -1,0 +1,79 @@
+services:
+
+  mariadb:
+    image: mariadb:11
+
+    environment:
+      MARIADB_DATABASE: mini_soar
+      MARIADB_USER: mini_soar_ci
+      MARIADB_PASSWORD: mini_soar_ci_password
+      MARIADB_ROOT_PASSWORD: mini_soar_ci_root_password
+
+    volumes:
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "healthcheck.sh",
+          "--connect",
+          "--innodb_initialized"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+    restart: "no"
+
+
+  demo-web:
+    image: ${DEMO_WEB_IMAGE}
+
+    container_name: demo-web
+
+    ports:
+      - "18000:8000"
+
+    restart: "no"
+
+
+  mini-soar-api:
+    image: ${MINI_SOAR_API_IMAGE}
+
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_NAME: mini_soar
+      DB_USER: mini_soar_ci
+      DB_PASSWORD: mini_soar_ci_password
+
+      NOTIFICATIONS_ENABLED: "false"
+      DISCORD_WEBHOOK_URL: ""
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    ports:
+      - "19000:9000"
+
+    depends_on:
+      mariadb:
+        condition: service_healthy
+
+    restart: "no"
+
+
+  mini-soar-dashboard:
+    image: ${DASHBOARD_IMAGE}
+
+    environment:
+      API_UPSTREAM: http://mini-soar-api:9000
+
+    ports:
+      - "18080:80"
+
+    depends_on:
+      - mini-soar-api
+
+    restart: "no"
