@@ -2,7 +2,7 @@
 
 ## Scope
 
-Mini-SOAR runs in an isolated Linux lab. The monitored Docker workload, Zabbix Agent 2, and Mini-SOAR engine are hosted on the same server; Zabbix Server runs on a separate lab node. Phase 5 also provides a React/TypeScript dashboard and Vite development server.
+Mini-SOAR runs in an isolated Linux lab. The monitored Docker workload, Zabbix Agent 2, and Mini-SOAR engine are hosted on the same server; Zabbix Server runs on a separate lab node. Phase 5 provides a React/TypeScript dashboard and Vite development server, while Phase 6 adds outbound Discord remediation notifications.
 
 No password, token, private key, or other credential belongs in this document.
 
@@ -16,6 +16,7 @@ No password, token, private key, or other credential belongs in this document.
 | Mini-SOAR API | `192.168.136.110:9000` | Webhook ingestion, process health, and remediation history API |
 | MariaDB | Local to the monitored host | Stores the `mini_soar.remediation_history` audit table |
 | Dashboard development server | Port `5173` | Serves the Vite UI and proxies backend requests during development |
+| Discord Webhook | External, configured by environment | Receives selected remediation outcome notifications |
 
 These private addresses describe the current lab and should be adjusted for another environment.
 
@@ -26,6 +27,7 @@ These private addresses describe the current lab and should be adjusted for anot
 - MariaDB for remediation persistence and dashboard data
 - Node.js and npm for the frontend
 - Zabbix Server and Zabbix Agent 2 for monitoring and event delivery
+- Outbound access to the configured Discord webhook when notifications are enabled
 
 ## Development Ports
 
@@ -131,6 +133,22 @@ cp .env.example .env
 | `DB_USER` | `mini_soar` | Database account |
 | `DB_PASSWORD` | Empty | Database password; set this locally |
 
+`NotificationService` reads:
+
+| Variable | Default in code | Purpose |
+|---|---|---|
+| `NOTIFICATIONS_ENABLED` | `false` | Enables notification delivery only when the normalized value is `true` |
+| `DISCORD_WEBHOOK_URL` | Empty | Discord webhook for outbound remediation outcomes |
+
+Keep notifications disabled until a local webhook has been configured:
+
+```env
+NOTIFICATIONS_ENABLED=false
+DISCORD_WEBHOOK_URL=your_discord_webhook_url
+```
+
+Do not store or print a real Discord webhook URL in documentation, logs, screenshots, or committed files. The tracked `.env.example` contains placeholders only; real values belong in the ignored `.env` file.
+
 The API ports are supplied to Uvicorn in the current implementation; they are not read from application environment variables.
 
 ## MariaDB
@@ -157,6 +175,7 @@ The required lab paths are:
 | Zabbix Server | Zabbix Agent 2 TCP `10050` | Passive agent checks when used by the lab configuration |
 | Mini-SOAR | Local Docker daemon | Inspect, start, restart, and verify `demo-web` |
 | Mini-SOAR | Local MariaDB TCP `3306` | Persist and query remediation history |
+| Mini-SOAR | Configured Discord webhook | Send outbound `SUCCESS`, `FAILED`, and `ERROR` outcome notifications |
 
 Firewall rules should expose only the paths required by the lab.
 
@@ -181,6 +200,8 @@ Open `http://192.168.136.110:9000/docs` from a browser that can reach the lab ne
 
 With both development servers running, open `http://localhost:5173` and confirm that the dashboard reports `Operational`, renders summary/distribution data, and lists recent remediations. The indicator is based on the dashboard's API requests rather than a dedicated `/health` poll.
 
+To verify Phase 6, keep the webhook value in the local `.env`, set `NOTIFICATIONS_ENABLED=true`, restart the backend so configuration is reloaded, and trigger a controlled container remediation. Confirm that a Discord embed contains the event type, service, status, action, host, duration, and details. A `SKIPPED` duplicate, cooldown, or in-progress decision should remain in the audit trail without producing a Discord notification.
+
 ## Runtime Data
 
 - Local remediation audit: `logs/remediation.jsonl`
@@ -188,6 +209,8 @@ With both development servers running, open `http://localhost:5173` and confirm 
 - Local environment values: `.env`
 - Frontend dependency cache: `frontend/node_modules/`
 - Frontend build output: `frontend/dist/`
+
+Notification delivery results are logged but are not stored in a separate persistent notification table or queue.
 
 The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `logs/`, `frontend/node_modules/`, and `frontend/dist/` paths are ignored by Git.
 
@@ -200,4 +223,7 @@ The `.env`, `.venv/`, `__pycache__/`, `*.pyc`, `logs/`, `frontend/node_modules/`
 - MariaDB must be reachable for history API queries.
 - The dashboard is read-only; it does not provide browser-triggered remediation.
 - The repository has frontend source and development/build tooling but no production dashboard hosting configuration.
-- Notification, Jenkins, and durable worker components are not implemented.
+- Discord notifications are disabled by default and require a locally configured webhook plus outbound connectivity.
+- Notification delivery is synchronous with a five-second timeout and has no retry, durable queue, or acknowledgement workflow.
+- Notification failure is isolated from remediation, but delivery status is not persisted separately.
+- Jenkins and durable worker components are not implemented.

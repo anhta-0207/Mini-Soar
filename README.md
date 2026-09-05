@@ -4,17 +4,18 @@
 
 ## Overview
 
-Mini-SOAR is an isolated DevOps and security automation lab that connects Zabbix detection to guarded Docker remediation, recovery verification, an auditable incident history, REST APIs, and a read-only security operations dashboard.
+Mini-SOAR is an isolated DevOps and security automation lab that connects Zabbix detection to guarded Docker remediation, recovery verification, an auditable incident history, REST APIs, a read-only security operations dashboard, and Discord outcome notifications.
 
 The project demonstrates a deliberately narrow SOAR workflow for a single monitored workload. It is a portfolio project, not a replacement for an enterprise SOAR platform and not production-ready infrastructure.
 
-Phases 1 through 5 are implemented:
+Phases 1 through 6 are implemented:
 
 - Linux and Docker workload infrastructure
 - Zabbix monitoring and detection
 - Webhook ingestion, event normalization, and routing
 - Automated container remediation, verification, audit persistence, and history APIs
 - A read-only React and TypeScript security operations dashboard
+- Discord notifications for attempted remediation outcomes
 
 ## Key Features
 
@@ -29,6 +30,8 @@ Phases 1 through 5 are implemented:
 - JSONL audit records plus MariaDB persistence
 - REST endpoints for remediation history, summary, distribution, and event lookup
 - React and TypeScript dashboard with KPIs, filters, analytics, and refresh controls
+- Discord webhook notifications for `SUCCESS`, `FAILED`, and `ERROR` remediation outcomes
+- Notification failure isolation from the remediation pipeline
 - Controlled Bash scripts for repeatable failure injection
 - Unit coverage for the remediation guard
 
@@ -52,10 +55,22 @@ demo-web -> Zabbix Agent 2 -> Zabbix Server -> Trigger -> Action
                                      demo-web -> Verification
                                                         |
                                                         v
+                                                Release guard
+                                                        |
+                                                        v
                                                   AuditService
-                                                   /         \
-                                                  v           v
-                                               JSONL       MariaDB
+                                                        |
+                                                        v
+                                        JSONL write + MariaDB attempt
+                                                        |
+                                                        v
+                                             RemediationNotifier
+                                                        |
+                                                        v
+                                            NotificationService
+                                                        |
+                                                        v
+                                               Discord webhook
 
 Observability plane
 
@@ -63,7 +78,7 @@ MariaDB -> FastAPI remediation APIs -> Vite development proxy
                                       -> React/TypeScript dashboard
 ```
 
-The dashboard is separate from the automation path. It reads persisted remediation data and has no control that starts or restarts a container, invokes a playbook, or executes a shell command.
+The dashboard is separate from the automation path. It reads persisted remediation data and has no control that starts or restarts a container, invokes a playbook, or executes a shell command. Discord is an external, outbound notification channel and cannot control remediation.
 
 The webhook route executes synchronously in the current implementation. `RECOVERY` events are logged and stop at the router; they do not trigger remediation.
 
@@ -79,6 +94,7 @@ See [the technical architecture](docs/architecture.md) for component boundaries,
 | Remediation | Python subprocess argument lists, Docker CLI |
 | Persistence | JSONL, MariaDB, PyMySQL |
 | Dashboard | React, TypeScript, Vite |
+| Notifications | Discord Webhook |
 | Failure simulation | Bash, curl |
 | Source control | Git, GitHub |
 
@@ -104,7 +120,9 @@ For container `PROBLEM` events, the router calls the container recovery playbook
 4. For `CONTAINER_DOWN`, start the container only if it is stopped.
 5. For `CONTAINER_UNHEALTHY`, restart it if running or defensively start it if it stopped before handling.
 6. Poll Docker for up to 90 seconds until the container is running and its health is `healthy` (or it has no health check).
-7. Release the guard and write the outcome to JSONL and MariaDB.
+7. Release the remediation guard.
+8. Write the outcome to JSONL and MariaDB.
+9. For `SUCCESS`, `FAILED`, or `ERROR`, attempt a Discord notification after the audit call returns.
 
 The playbook records `SUCCESS`, `FAILED`, or `ERROR` for attempted remediation. Guard denials are recorded as `SKIPPED` with a reason such as `duplicate_event`, `remediation_in_progress`, or `cooldown_active`.
 
@@ -119,6 +137,7 @@ The playbook records `SUCCESS`, `FAILED`, or `ERROR` for attempted remediation. 
 - Every Docker action is followed by running-state and health verification.
 - `RECOVERY` events do not invoke remediation.
 - JSONL is written before the MariaDB insert, and database exceptions are logged without failing the completed remediation flow.
+- Discord delivery errors are contained by the notification service and notifier; they do not change the remediation result.
 - Secrets are loaded from environment variables and belong in the ignored `.env` file.
 
 These controls reduce risk inside the lab; they do not replace host isolation, least-privilege Docker access, webhook authentication, or a durable job system.
@@ -150,6 +169,40 @@ Workflow status values are `SUCCESS`, `FAILED`, `ERROR`, and `SKIPPED`.
 Local audit records are appended to `logs/remediation.jsonl`. The same decision is inserted into the MariaDB `mini_soar.remediation_history` table defined in [database/schema.sql](database/schema.sql).
 
 The `logs/` directory is runtime data and is ignored by Git.
+
+## Notifications
+
+Mini-SOAR can send attempted remediation outcomes to Discord through a configurable webhook. Notification is evaluated only after the remediation guard has been released and the audit service has written the JSONL record and attempted MariaDB persistence.
+
+| Remediation status | Discord notification |
+|---|---|
+| `SUCCESS` | Yes |
+| `FAILED` | Yes |
+| `ERROR` | Yes |
+| `SKIPPED` | No |
+
+`SKIPPED` decisions include duplicate events, an active cooldown, and another remediation already in progress. Suppressing these notifications reduces repeated messages and alert fatigue while the decisions remain available in the audit trail.
+
+Discord embeds include:
+
+- event ID and event type;
+- service, host, action, and status;
+- remediation duration;
+- details when a result message is available.
+
+The embed title identifies the remediation status, and its description identifies the event ID. Detail text is limited to 1,000 characters by the implementation.
+
+### Failure Isolation
+
+Notification delivery is deliberately isolated from remediation. `NotificationService` returns a structured result for disabled notifications, non-notifiable statuses, missing configuration, successful delivery, HTTP errors, connection errors, and unexpected errors. Discord requests use a five-second HTTP timeout.
+
+`RemediationNotifier` adds a second exception boundary so notification failures do not propagate into the remediation workflow. If Discord is unavailable, the webhook is invalid, a request times out, or Discord returns an HTTP error:
+
+- the established remediation status is not changed;
+- the preceding audit work is not rolled back;
+- the Mini-SOAR remediation pipeline does not fail solely because notification delivery failed.
+
+There is no retry mechanism, persistent notification queue, or acknowledgement workflow in the current implementation.
 
 ## REST API
 
@@ -279,7 +332,7 @@ mini-soar/
 |   |-- api/                          # webhook and history routes
 |   |-- core/                         # event and response models
 |   |-- playbooks/                    # routing and response policy
-|   |-- services/                     # Docker, guard, audit, database
+|   |-- services/                     # Docker, guard, audit, database, notifications
 |   `-- main.py                       # Mini-SOAR FastAPI application
 |-- tests/
 |   `-- test_remediation_guard.py
@@ -307,6 +360,32 @@ Generated frontend dependencies and builds (`frontend/node_modules/` and `fronte
 - MariaDB
 - Node.js and npm
 - Zabbix Server and Zabbix Agent 2
+
+## Environment Variables
+
+Copy `.env.example` to the ignored `.env` file and provide local values. The backend reads these database variables:
+
+- `DB_HOST`
+- `DB_PORT`
+- `DB_NAME`
+- `DB_USER`
+- `DB_PASSWORD`
+
+Phase 6 adds:
+
+| Variable | Purpose |
+|---|---|
+| `NOTIFICATIONS_ENABLED` | Enables notifications only when its normalized value is `true`; defaults to disabled |
+| `DISCORD_WEBHOOK_URL` | Discord webhook used for outbound remediation notifications |
+
+Safe disabled configuration:
+
+```env
+NOTIFICATIONS_ENABLED=false
+DISCORD_WEBHOOK_URL=your_discord_webhook_url
+```
+
+Do not commit a real Discord webhook URL. When notifications are disabled or the URL is not configured, the service returns a non-success result and remediation continues.
 
 ## Backend Development
 
@@ -346,6 +425,10 @@ Browser -> Vite :5173 -> /api proxy -> FastAPI :9000 -> MariaDB
 ```
 
 ## Demo Evidence
+
+### Phase 6 Discord notification
+
+![Discord remediation success notification](docs/images/23-discord-remediation-success.png)
 
 ### Phase 5 dashboard
 
@@ -394,6 +477,9 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 - Secrets are loaded from environment variables; `.env.example` contains placeholders only.
 - `.env`, virtual environments, Python caches, runtime logs, frontend dependencies, and frontend builds are ignored by Git.
 - The dashboard is read-only and has no direct Docker or playbook control.
+- Discord is an outbound notification channel only and has no remediation control path.
+- The Discord webhook is read from the ignored local environment and must not be committed.
+- Notification failures are contained and cannot overwrite a completed remediation result.
 - The Python webhook handler consumes `event_type` and `service` tags but does not enforce `managed_by`; intended-event filtering must be applied in Zabbix and at the network boundary.
 - The webhook and remediation history APIs currently have no authentication or authorization.
 - Docker daemon access is highly privileged, and this lab architecture is not hardened production infrastructure.
@@ -409,10 +495,10 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 - JSONL and MariaDB audit persistence
 - Remediation REST APIs
 - Read-only React/TypeScript security operations dashboard
+- Discord remediation outcome notifications with failure isolation
 
 ### Planned
 
-- Notification and alert delivery
 - Jenkins CI/CD
 - Webhook/API authentication and authorization
 - Durable workers, persistent guard state, retry/backoff, and circuit breaking
@@ -427,4 +513,5 @@ Additional Phase 1-3 evidence is available in [docs/images/](docs/images/), incl
 | Phase 3 | Event ingestion, normalization, and routing | Complete |
 | Phase 4 | Automated remediation, verification, audit, persistence, and REST API | Complete |
 | Phase 5 | Read-only security operations dashboard | Complete |
-| Future | Notifications, CI/CD, and additional hardening | Planned |
+| Phase 6 | Discord remediation outcome notifications | Complete |
+| Future | CI/CD and additional hardening | Planned |
