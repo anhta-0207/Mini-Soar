@@ -5,19 +5,13 @@ pipeline {
 
     options {
         timestamps()
-
-        // Prevent two deployments from the same job running concurrently.
         disableConcurrentBuilds()
-
-        // We perform checkout explicitly in the Checkout stage.
         skipDefaultCheckout(true)
 
-        // Allow "Restart from Stage" to recover deployment artifacts.
         preserveStashes(
             buildCount: 5
         )
 
-        // Prevent a stuck build from running indefinitely.
         timeout(
             time: 30,
             unit: 'MINUTES'
@@ -49,7 +43,6 @@ pipeline {
         DEPLOY_USER = 'mini-soar-deploy'
         DEPLOY_DIR = '/opt/mini-soar'
 
-        // Used by post-failure rollback logic.
         DEPLOY_ATTEMPTED = 'false'
         DEPLOY_VERIFIED = 'false'
     }
@@ -57,85 +50,65 @@ pipeline {
     stages {
 
         // ============================================================
-        // SOURCE
+        // 1. CHECK
         // ============================================================
 
-        stage('Checkout') {
+        stage('Check') {
             steps {
+
+                // ----------------------------------------------------
+                // Checkout
+                // ----------------------------------------------------
+
                 checkout scm
 
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo " Mini-SOAR CI/CD Pipeline"
+                    echo " Mini-SOAR - CHECK"
                     echo "======================================"
 
-                    echo ""
-                    echo "Commit:"
-                    git rev-parse HEAD
-
-                    echo ""
-                    echo "Branch:"
-                    git branch --show-current || true
-
-                    echo ""
-                    echo "Build:"
-                    echo "${BUILD_NUMBER}"
-
-                    echo ""
-                    echo "Workspace:"
-                    pwd
+                    echo "Commit : $(git rev-parse HEAD)"
+                    echo "Branch : $(git branch --show-current || true)"
+                    echo "Build  : ${BUILD_NUMBER}"
+                    echo "Path   : $(pwd)"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // ENVIRONMENT
-        // ============================================================
+                // ----------------------------------------------------
+                // Environment
+                // ----------------------------------------------------
 
-        stage('Environment Check') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "========== Python =========="
-                    python3 --version
+                    echo ""
+                    echo "========== Environment =========="
 
-                    echo "========== pip =========="
+                    python3 --version
                     python3 -m pip --version
 
-                    echo "========== Node =========="
                     node --version
-
-                    echo "========== npm =========="
                     npm --version
 
-                    echo "========== Docker =========="
                     docker --version
-
-                    echo "========== Docker Compose =========="
                     docker compose version
 
-                    echo "========== curl =========="
                     curl --version | head -1
-
-                    echo "========== SSH =========="
                     ssh -V 2>&1
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // BACKEND CI
-        // ============================================================
+                // ----------------------------------------------------
+                // Backend
+                // ----------------------------------------------------
 
-        stage('Backend Dependencies') {
-            steps {
                 sh '''
                     set -e
+
+                    echo ""
+                    echo "========== Backend =========="
 
                     rm -rf .jenkins-venv
 
@@ -147,76 +120,76 @@ pipeline {
 
                     python -m pip install \
                         -r requirements.txt
-                '''
-            }
-        }
-
-        stage('Backend Validation') {
-            steps {
-                sh '''
-                    set -e
-
-                    . .jenkins-venv/bin/activate
-
-                    echo "Running Python compile validation..."
 
                     python -m compileall src app
 
-                    echo ""
-                    echo "Checking dependency consistency..."
-
                     python -m pip check
 
-                    echo ""
                     echo "Backend validation PASS"
+                '''
+
+
+                // ----------------------------------------------------
+                // Frontend
+                // ----------------------------------------------------
+
+                dir('frontend') {
+                    sh '''
+                        set -e
+
+                        echo ""
+                        echo "========== Frontend =========="
+
+                        npm ci
+                        npm run build
+
+                        echo "Frontend validation PASS"
+                    '''
+                }
+
+
+                // ----------------------------------------------------
+                // Compose validation
+                // ----------------------------------------------------
+
+                sh '''
+                    set -e
+
+                    echo ""
+                    echo "========== CI Compose =========="
+
+                    docker compose \
+                        -f docker-compose.ci.yml \
+                        config \
+                        >/dev/null
+
+                    echo "CI Compose validation PASS"
+
+                    echo ""
+                    echo "======================================"
+                    echo " CHECK PASS"
+                    echo "======================================"
                 '''
             }
         }
 
 
         // ============================================================
-        // FRONTEND CI
+        // 2. BUILD & TEST
         // ============================================================
 
-        stage('Frontend Dependencies') {
+        stage('Build & Test') {
             steps {
-                dir('frontend') {
-                    sh '''
-                        set -e
 
-                        npm ci
-                    '''
-                }
-            }
-        }
+                // ----------------------------------------------------
+                // Build Docker images
+                // ----------------------------------------------------
 
-        stage('Frontend Build') {
-            steps {
-                dir('frontend') {
-                    sh '''
-                        set -e
-
-                        npm run build
-
-                        echo ""
-                        echo "Frontend build PASS"
-                    '''
-                }
-            }
-        }
-
-
-        // ============================================================
-        // BUILD TESTED DOCKER ARTIFACTS
-        // ============================================================
-
-        stage('Build Docker Images') {
-            steps {
                 sh '''
                     set -e
 
                     echo "======================================"
-                    echo " Building Docker Images"
+                    echo " Mini-SOAR - BUILD & TEST"
                     echo "======================================"
 
                     echo ""
@@ -227,6 +200,7 @@ pipeline {
                         -t "${DEMO_WEB_IMAGE}" \
                         .
 
+
                     echo ""
                     echo "Building Mini-SOAR API..."
 
@@ -235,6 +209,7 @@ pipeline {
                         -t "${MINI_SOAR_API_IMAGE}" \
                         .
 
+
                     echo ""
                     echo "Building dashboard..."
 
@@ -242,6 +217,7 @@ pipeline {
                         -f frontend/Dockerfile \
                         -t "${DASHBOARD_IMAGE}" \
                         frontend/
+
 
                     echo ""
                     echo "Built images:"
@@ -255,194 +231,97 @@ pipeline {
                     echo ""
                     echo "Docker image build PASS"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // CI COMPOSE VALIDATION
-        // ============================================================
+                // ----------------------------------------------------
+                // Start CI stack + readiness
+                // ----------------------------------------------------
 
-        stage('Validate CI Compose') {
-            steps {
                 sh '''
                     set -e
 
-                    docker compose \
-                        -f docker-compose.ci.yml \
-                        config \
-                        >/dev/null
-
-                    echo "docker-compose.ci.yml validation PASS"
-                '''
-            }
-        }
-
-
-        // ============================================================
-        // START ISOLATED CI STACK
-        // ============================================================
-
-        stage('Start CI Stack') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "======================================"
-                    echo " Starting CI Stack"
-                    echo "======================================"
+                    echo ""
+                    echo "========== Starting CI Stack =========="
 
                     docker compose \
                         -f docker-compose.ci.yml \
                         up -d
 
-                    echo ""
-
                     docker compose \
                         -f docker-compose.ci.yml \
                         ps
+
+
+                    wait_http() {
+                        NAME="$1"
+                        URL="$2"
+                        SERVICE="$3"
+                        ATTEMPTS="${4:-30}"
+
+                        for attempt in $(seq 1 "$ATTEMPTS")
+                        do
+                            if curl \
+                                --fail \
+                                --silent \
+                                "$URL" \
+                                >/dev/null
+                            then
+                                echo "[PASS] ${NAME}"
+                                return 0
+                            fi
+
+                            echo \
+                                "[${attempt}/${ATTEMPTS}] Waiting for ${NAME}..."
+
+                            sleep 2
+                        done
+
+                        echo "[FAIL] ${NAME}"
+
+                        if [ -n "$SERVICE" ]
+                        then
+                            docker compose \
+                                -f docker-compose.ci.yml \
+                                logs "$SERVICE" \
+                                || true
+                        fi
+
+                        return 1
+                    }
+
+
+                    echo ""
+                    echo "========== Service Readiness =========="
+
+                    wait_http \
+                        "demo-web" \
+                        "http://127.0.0.1:18000/health" \
+                        "demo-web"
+
+                    wait_http \
+                        "Mini-SOAR API" \
+                        "http://127.0.0.1:19000/health" \
+                        "mini-soar-api"
+
+                    wait_http \
+                        "Dashboard" \
+                        "http://127.0.0.1:18080/healthz" \
+                        "mini-soar-dashboard"
+
+                    echo ""
+                    echo "All CI services ready."
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // SERVICE READINESS
-        // ============================================================
+                // ----------------------------------------------------
+                // API + integration tests
+                // ----------------------------------------------------
 
-        stage('Wait For Services') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "======================================"
-                    echo " Waiting for demo-web"
-                    echo "======================================"
-
-                    demo_ok=0
-
-                    for attempt in $(seq 1 30)
-                    do
-                        echo "demo-web attempt ${attempt}/30"
-
-                        if curl \
-                            --fail \
-                            --silent \
-                            http://127.0.0.1:18000/health \
-                            >/dev/null
-                        then
-                            demo_ok=1
-                            break
-                        fi
-
-                        sleep 2
-                    done
-
-                    if [ "${demo_ok}" -ne 1 ]
-                    then
-                        echo "demo-web did not become healthy"
-
-                        docker compose \
-                            -f docker-compose.ci.yml \
-                            logs demo-web || true
-
-                        exit 1
-                    fi
-
-
                     echo ""
-                    echo "======================================"
-                    echo " Waiting for Mini-SOAR API"
-                    echo "======================================"
-
-                    api_ok=0
-
-                    for attempt in $(seq 1 30)
-                    do
-                        echo "API attempt ${attempt}/30"
-
-                        if curl \
-                            --fail \
-                            --silent \
-                            http://127.0.0.1:19000/health \
-                            >/dev/null
-                        then
-                            api_ok=1
-                            break
-                        fi
-
-                        sleep 2
-                    done
-
-                    if [ "${api_ok}" -ne 1 ]
-                    then
-                        echo "Mini-SOAR API did not become healthy"
-
-                        docker compose \
-                            -f docker-compose.ci.yml \
-                            logs mini-soar-api || true
-
-                        exit 1
-                    fi
-
-
-                    echo ""
-                    echo "======================================"
-                    echo " Waiting for Dashboard"
-                    echo "======================================"
-
-                    dashboard_ok=0
-
-                    for attempt in $(seq 1 30)
-                    do
-                        echo "Dashboard attempt ${attempt}/30"
-
-                        if curl \
-                            --fail \
-                            --silent \
-                            http://127.0.0.1:18080/healthz \
-                            >/dev/null
-                        then
-                            dashboard_ok=1
-                            break
-                        fi
-
-                        sleep 2
-                    done
-
-                    if [ "${dashboard_ok}" -ne 1 ]
-                    then
-                        echo "Dashboard did not become healthy"
-
-                        docker compose \
-                            -f docker-compose.ci.yml \
-                            logs mini-soar-dashboard || true
-
-                        exit 1
-                    fi
-
-                    echo ""
-                    echo "All CI services are reachable."
-                '''
-            }
-        }
-
-
-        // ============================================================
-        // API INTEGRATION
-        // ============================================================
-
-        stage('API Smoke Tests') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "======================================"
-                    echo " API Smoke Tests"
-                    echo "======================================"
-
-                    echo ""
-                    echo "Testing OpenAPI..."
+                    echo "========== API Smoke Tests =========="
 
                     curl \
                         --fail \
@@ -453,9 +332,6 @@ pipeline {
                     echo "OpenAPI PASS"
 
 
-                    echo ""
-                    echo "Testing MariaDB integration..."
-
                     curl \
                         --fail \
                         --silent \
@@ -465,9 +341,6 @@ pipeline {
                     echo "MariaDB integration PASS"
 
 
-                    echo ""
-                    echo "Testing dashboard reverse proxy..."
-
                     curl \
                         --fail \
                         --silent \
@@ -475,26 +348,18 @@ pipeline {
                         >/dev/null
 
                     echo "Dashboard reverse proxy PASS"
-
-                    echo ""
-                    echo "API smoke tests PASS"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // DOCKER CONTROL PLANE
-        // ============================================================
+                // ----------------------------------------------------
+                // Docker control plane
+                // ----------------------------------------------------
 
-        stage('Docker Control Plane Check') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "======================================"
-                    echo " Docker Control Plane Compatibility"
-                    echo "======================================"
+                    echo ""
+                    echo "========== Docker Control Plane =========="
 
                     API_CONTAINER="$(
                         docker compose \
@@ -508,48 +373,76 @@ pipeline {
                         exit 1
                     fi
 
-                    echo ""
+
                     echo "Docker client/server compatibility:"
 
                     docker exec \
                         "${API_CONTAINER}" \
                         docker version
 
+
                     echo ""
-                    echo "Verifying demo-web visibility:"
+                    echo "demo-web visibility:"
 
                     docker exec \
                         "${API_CONTAINER}" \
                         docker inspect demo-web \
-                        --format 'running={{.State.Running}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
+                        --format \
+                        'running={{.State.Running}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'
 
                     echo ""
-                    echo "Docker control plane check PASS"
+                    echo "Docker control plane PASS"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // SELF-HEALING INTEGRATION TEST
-        // ============================================================
+                // ----------------------------------------------------
+                // Self-healing integration test
+                // ----------------------------------------------------
 
-        stage('Self-Healing Smoke Test') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "======================================"
-                    echo " Mini-SOAR Self-Healing Smoke Test"
-                    echo "======================================"
-
                     echo ""
+                    echo "========== Self-Healing Test =========="
+
+                    EVENT_ID="CI-${BUILD_NUMBER}"
+
                     echo "Stopping demo-web..."
 
                     docker stop demo-web
 
+
                     echo ""
-                    echo "Sending synthetic Zabbix DOWN event..."
+                    echo "Sending synthetic Zabbix event..."
+
+                    PAYLOAD="$(
+                        cat <<EOF
+{
+  "source": "zabbix",
+  "event_id": "${EVENT_ID}",
+  "event_name": "[CI] demo-web Container down",
+  "event_value": 1,
+  "severity": "High",
+  "host": "jenkins-ci",
+  "trigger_id": "${EVENT_ID}",
+  "tags": [
+    {
+      "tag": "event_type",
+      "value": "CONTAINER_DOWN"
+    },
+    {
+      "tag": "service",
+      "value": "demo-web"
+    },
+    {
+      "tag": "managed_by",
+      "value": "mini-soar"
+    }
+  ]
+}
+EOF
+                    )"
+
 
                     curl \
                         --fail \
@@ -557,33 +450,12 @@ pipeline {
                         --show-error \
                         -X POST \
                         -H 'Content-Type: application/json' \
-                        -d '{
-                              "source": "zabbix",
-                              "event_id": "CI-'${BUILD_NUMBER}'",
-                              "event_name": "[CI] demo-web Container down",
-                              "event_value": 1,
-                              "severity": "High",
-                              "host": "jenkins-ci",
-                              "trigger_id": "CI-'${BUILD_NUMBER}'",
-                              "tags": [
-                                {
-                                  "tag": "event_type",
-                                  "value": "CONTAINER_DOWN"
-                                },
-                                {
-                                  "tag": "service",
-                                  "value": "demo-web"
-                                },
-                                {
-                                  "tag": "managed_by",
-                                  "value": "mini-soar"
-                                }
-                              ]
-                            }' \
+                        --data "${PAYLOAD}" \
                         http://127.0.0.1:19000/api/v1/webhooks/zabbix
 
+
                     echo ""
-                    echo "Waiting for Mini-SOAR recovery..."
+                    echo "Waiting for recovery..."
 
                     recovered=0
 
@@ -593,22 +465,25 @@ pipeline {
                             docker inspect \
                                 --format '{{.State.Running}}' \
                                 demo-web \
-                                2>/dev/null || echo false
+                                2>/dev/null \
+                                || echo false
                         )"
 
                         health="$(
                             docker inspect \
-                                --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+                                --format \
+                                '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
                                 demo-web \
-                                2>/dev/null || echo unknown
+                                2>/dev/null \
+                                || echo unknown
                         )"
 
                         echo \
                             "Attempt ${attempt}/60: " \
                             "running=${running} health=${health}"
 
-                        if [ "${running}" = "true" ] \
-                           && [ "${health}" = "healthy" ]
+                        if [ "${running}" = "true" ] && \
+                           [ "${health}" = "healthy" ]
                         then
                             recovered=1
                             break
@@ -617,17 +492,19 @@ pipeline {
                         sleep 2
                     done
 
+
                     if [ "${recovered}" -ne 1 ]
                     then
                         echo ""
-                        echo "Self-healing smoke test FAILED"
+                        echo "Self-healing FAILED"
 
                         echo ""
-                        echo "========== Mini-SOAR API logs =========="
+                        echo "========== Mini-SOAR logs =========="
 
                         docker compose \
                             -f docker-compose.ci.yml \
-                            logs mini-soar-api || true
+                            logs mini-soar-api \
+                            || true
 
                         echo ""
                         echo "========== demo-web logs =========="
@@ -637,80 +514,58 @@ pipeline {
                         exit 1
                     fi
 
+
                     echo ""
-                    echo "demo-web recovered successfully."
-                    echo "Self-healing smoke test PASS"
-                '''
-            }
-        }
+                    echo "demo-web recovered."
+
+                    echo ""
+                    echo "Verifying audit record..."
 
 
-        // ============================================================
-        // AUDIT
-        // ============================================================
-
-        stage('Verify Audit Persistence') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "======================================"
-                    echo " Verify Audit Persistence"
-                    echo "======================================"
-
-                    result="$(
+                    RESULT="$(
                         curl \
                             --fail \
                             --silent \
-                            "http://127.0.0.1:19000/api/v1/remediations/CI-${BUILD_NUMBER}"
+                            "http://127.0.0.1:19000/api/v1/remediations/${EVENT_ID}"
                     )"
 
-                    echo "${result}"
+                    echo "${RESULT}"
 
-                    echo "${result}" \
+
+                    echo "${RESULT}" \
                         | grep -q '"status":"SUCCESS"'
 
-                    echo "${result}" \
+                    echo "${RESULT}" \
                         | grep -q '"action":"start"'
 
                     echo ""
-                    echo "Audit persistence PASS"
+                    echo "Self-healing + audit verification PASS"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // DEPLOYMENT GATE
-        // ============================================================
+                // ----------------------------------------------------
+                // Deployment Gate
+                // ----------------------------------------------------
 
-        stage('Deployment Gate') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "======================================"
-                    echo " Deployment Gate"
-                    echo "======================================"
+                    echo ""
+                    echo "========== Deployment Gate =========="
 
                     git fetch origin main --quiet
 
                     CURRENT_SHA="$(git rev-parse HEAD)"
                     MAIN_SHA="$(git rev-parse origin/main)"
 
-                    echo ""
-                    echo "Current commit:"
-                    echo "${CURRENT_SHA}"
-
-                    echo ""
-                    echo "origin/main:"
-                    echo "${MAIN_SHA}"
+                    echo "Current     : ${CURRENT_SHA}"
+                    echo "origin/main : ${MAIN_SHA}"
 
                     if [ "${CURRENT_SHA}" != "${MAIN_SHA}" ]
                     then
                         echo ""
                         echo "DEPLOYMENT BLOCKED"
-                        echo "The tested commit is not origin/main."
+                        echo "Tested commit is not origin/main."
 
                         exit 1
                     fi
@@ -718,31 +573,23 @@ pipeline {
                     echo ""
                     echo "Deployment gate PASS"
                 '''
-            }
-        }
 
 
-        // ============================================================
-        // PACKAGE + CHECKSUM + METADATA
-        // ============================================================
+                // ----------------------------------------------------
+                // Package tested images
+                // ----------------------------------------------------
 
-        stage('Package Deployment Artifacts') {
-            steps {
                 sh '''
                     set -e
 
-                    echo "======================================"
-                    echo " Packaging Tested Artifacts"
-                    echo "======================================"
+                    echo ""
+                    echo "========== Package Artifacts =========="
 
                     rm -rf deploy-artifacts
                     mkdir -p deploy-artifacts
 
-                    echo ""
-                    echo "Saving:"
-                    echo "  ${DEMO_WEB_IMAGE}"
-                    echo "  ${MINI_SOAR_API_IMAGE}"
-                    echo "  ${DASHBOARD_IMAGE}"
+
+                    echo "Saving tested Docker images..."
 
                     docker save \
                         "${DEMO_WEB_IMAGE}" \
@@ -751,15 +598,18 @@ pipeline {
                         | gzip \
                         > deploy-artifacts/mini-soar-images.tar.gz
 
+
                     cp \
                         docker-compose.yml \
                         deploy-artifacts/docker-compose.yml
+
 
                     printf '%s\n' \
                         "DEMO_WEB_IMAGE=${DEMO_WEB_IMAGE}" \
                         "MINI_SOAR_API_IMAGE=${MINI_SOAR_API_IMAGE}" \
                         "DASHBOARD_IMAGE=${DASHBOARD_IMAGE}" \
                         > deploy-artifacts/.deploy.env
+
 
                     (
                         cd deploy-artifacts
@@ -769,174 +619,239 @@ pipeline {
                             > mini-soar-images.tar.gz.sha256
                     )
 
+
                     COMMIT_SHA="$(git rev-parse HEAD)"
-                    DEPLOYED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+                    CREATED_AT="$(
+                        date -u '+%Y-%m-%dT%H:%M:%SZ'
+                    )"
 
                     ARCHIVE_SHA256="$(
                         awk '{print $1}' \
                             deploy-artifacts/mini-soar-images.tar.gz.sha256
                     )"
 
+
                     printf '%s\n' \
                         "BUILD_NUMBER=${BUILD_NUMBER}" \
                         "COMMIT_SHA=${COMMIT_SHA}" \
-                        "CREATED_AT=${DEPLOYED_AT}" \
+                        "CREATED_AT=${CREATED_AT}" \
                         "ARCHIVE_SHA256=${ARCHIVE_SHA256}" \
                         "DEMO_WEB_IMAGE=${DEMO_WEB_IMAGE}" \
                         "MINI_SOAR_API_IMAGE=${MINI_SOAR_API_IMAGE}" \
                         "DASHBOARD_IMAGE=${DASHBOARD_IMAGE}" \
                         > deploy-artifacts/deployment.env
 
+
                     echo ""
-                    echo "Deployment artifacts:"
+                    echo "Artifacts:"
 
                     ls -lah deploy-artifacts/
+
 
                     echo ""
                     echo "Deployment metadata:"
 
                     cat deploy-artifacts/deployment.env
 
+
                     echo ""
                     echo "Artifact checksum:"
 
-                    cat deploy-artifacts/mini-soar-images.tar.gz.sha256
+                    cat \
+                        deploy-artifacts/mini-soar-images.tar.gz.sha256
 
                     echo ""
                     echo "Artifact packaging PASS"
                 '''
 
-                // Allows restart from Transfer Deployment Artifacts.
+
+                // ----------------------------------------------------
+                // Preserve deployment artifacts
+                // ----------------------------------------------------
+
                 stash(
                     name: 'deployment-artifacts',
                     includes: 'deploy-artifacts/**,deploy-artifacts/.deploy.env',
                     useDefaultExcludes: false
                 )
 
-                // Safe metadata only — no secrets.
+
                 archiveArtifacts(
                     artifacts: 'deploy-artifacts/deployment.env',
                     fingerprint: true
                 )
+
+
+                sh '''
+                    echo ""
+                    echo "======================================"
+                    echo " BUILD & TEST PASS"
+                    echo "======================================"
+                '''
             }
         }
 
 
         // ============================================================
-        // BACKUP CURRENT RELEASE + TRANSFER
+        // 3. DEPLOY
         // ============================================================
 
-        stage('Transfer Deployment Artifacts') {
+        stage('Deploy') {
             steps {
-                // Restores artifacts automatically when restarting this stage.
+
+                // Supports Restart from Deploy.
                 unstash 'deployment-artifacts'
 
+
                 sshagent(credentials: ['mini-soar-deploy-ssh']) {
+
+                    // ------------------------------------------------
+                    // Connectivity + backup + transfer
+                    // ------------------------------------------------
+
                     sh '''
                         set -e
 
                         echo "======================================"
-                        echo " Transfer Deployment Artifacts"
+                        echo " Mini-SOAR - DEPLOY"
                         echo "======================================"
 
-                        echo ""
-                        echo "Checking SSH connectivity..."
+                        TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
-                        ssh \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            -o ConnectionAttempts=2 \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+
+                        ssh_remote() {
+                            ssh \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=yes \
+                                -o ConnectTimeout=10 \
+                                -o ConnectionAttempts=2 \
+                                "$@"
+                        }
+
+
+                        scp_remote() {
+                            scp \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=yes \
+                                -o ConnectTimeout=10 \
+                                -o ConnectionAttempts=2 \
+                                "$@"
+                        }
+
+
+                        echo ""
+                        echo "========== SSH =========="
+
+                        ssh_remote \
+                            "${TARGET}" \
                             "mkdir -p ${DEPLOY_DIR}"
 
                         echo "SSH connectivity PASS"
 
 
                         echo ""
-                        echo "Backing up current deployment metadata..."
+                        echo "========== Backup Current Release =========="
 
-                        ssh \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            -o ConnectionAttempts=2 \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                        ssh_remote \
+                            "${TARGET}" \
                             "
                                 set -e
 
                                 cd ${DEPLOY_DIR}
 
-                                if [ -f .deploy.env ]
+                                SAME_BUILD=false
+
+                                if [ -f deployment.env ] &&
+                                   grep -Fxq \
+                                       'BUILD_NUMBER=${BUILD_NUMBER}' \
+                                       deployment.env
                                 then
-                                    cp .deploy.env .deploy.env.previous
+                                    SAME_BUILD=true
                                 fi
 
-                                if [ -f docker-compose.yml ]
+                                if [ \\"\\${SAME_BUILD}\\" = false ]
                                 then
-                                    cp docker-compose.yml docker-compose.previous.yml
-                                fi
+                                    if [ -f .deploy.env ]
+                                    then
+                                        cp \
+                                            .deploy.env \
+                                            .deploy.env.previous
+                                    fi
 
-                                if [ -f deployment.env ]
-                                then
-                                    cp deployment.env deployment.previous.env
+                                    if [ -f docker-compose.yml ]
+                                    then
+                                        cp \
+                                            docker-compose.yml \
+                                            docker-compose.previous.yml
+                                    fi
+
+                                    if [ -f deployment.env ]
+                                    then
+                                        cp \
+                                            deployment.env \
+                                            deployment.previous.env
+                                    fi
+
+                                    echo 'Previous release backed up.'
+                                else
+                                    echo \
+                                      'Same build already staged; preserving previous backup.'
                                 fi
                             "
 
-                        echo "Previous deployment metadata backup PASS"
-
 
                         echo ""
-                        echo "Transferring deployment artifacts..."
+                        echo "========== Transfer =========="
 
-                        scp \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            -o ConnectionAttempts=2 \
+                        scp_remote \
                             deploy-artifacts/mini-soar-images.tar.gz \
                             deploy-artifacts/mini-soar-images.tar.gz.sha256 \
                             deploy-artifacts/docker-compose.yml \
                             deploy-artifacts/.deploy.env \
                             deploy-artifacts/deployment.env \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_DIR}/"
+                            "${TARGET}:${DEPLOY_DIR}/"
 
-                        echo ""
                         echo "Artifact transfer PASS"
                     '''
-                }
-            }
-        }
 
 
-        // ============================================================
-        // DEPLOY TESTED ARTIFACT
-        // ============================================================
+                    // Actual runtime is about to be modified.
+                    script {
+                        env.DEPLOY_ATTEMPTED = 'true'
+                    }
 
-        stage('Deploy to Lab Server') {
-            steps {
-                script {
-                    env.DEPLOY_ATTEMPTED = 'true'
-                }
 
-                sshagent(credentials: ['mini-soar-deploy-ssh']) {
+                    // ------------------------------------------------
+                    // Deploy
+                    // ------------------------------------------------
+
                     sh '''
                         set -e
 
-                        echo "======================================"
-                        echo " Deploying Mini-SOAR"
-                        echo "======================================"
+                        TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
-                        ssh \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            -o ConnectionAttempts=2 \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                        ssh_remote() {
+                            ssh \
+                                -o BatchMode=yes \
+                                -o StrictHostKeyChecking=yes \
+                                -o ConnectTimeout=10 \
+                                -o ConnectionAttempts=2 \
+                                "$@"
+                        }
+
+
+                        echo ""
+                        echo "========== Deploy Tested Artifact =========="
+
+
+                        ssh_remote \
+                            "${TARGET}" \
                             "
                                 set -e
 
                                 cd ${DEPLOY_DIR}
+
 
                                 echo 'Checking deployment files...'
 
@@ -947,11 +862,11 @@ pipeline {
                                 test -f mini-soar-images.tar.gz
                                 test -f mini-soar-images.tar.gz.sha256
 
-                                echo 'Deployment files OK'
+                                echo 'Deployment files PASS'
 
 
                                 echo ''
-                                echo 'Verifying artifact checksum...'
+                                echo 'Verifying SHA256...'
 
                                 sha256sum \
                                     -c mini-soar-images.tar.gz.sha256
@@ -962,15 +877,13 @@ pipeline {
                                 echo ''
                                 echo 'Loading tested Docker images...'
 
-                                gzip -dc mini-soar-images.tar.gz \
+                                gzip -dc \
+                                    mini-soar-images.tar.gz \
                                     | docker load
 
-                                echo ''
-                                echo 'Docker images loaded.'
-
 
                                 echo ''
-                                echo 'Validating production Compose configuration...'
+                                echo 'Validating production Compose...'
 
                                 docker compose \
                                     --env-file .deploy.env \
@@ -978,11 +891,11 @@ pipeline {
                                     config \
                                     >/dev/null
 
-                                echo 'Compose validation PASS'
+                                echo 'Production Compose PASS'
 
 
                                 echo ''
-                                echo 'Starting application stack...'
+                                echo 'Starting application...'
 
                                 docker compose \
                                     --env-file .deploy.env \
@@ -990,178 +903,105 @@ pipeline {
                                     up -d \
                                     --no-build
 
+
                                 echo ''
-                                echo 'Current stack:'
+                                echo 'Deployment state:'
 
                                 docker compose \
                                     --env-file .deploy.env \
                                     -f docker-compose.yml \
                                     ps
-
-                                echo ''
-                                echo 'Deployment command completed.'
                             "
 
                         echo ""
                         echo "Compose deployment PASS"
                     '''
-                }
-            }
-        }
 
 
-        // ============================================================
-        // POST-DEPLOY VERIFICATION
-        // ============================================================
+                    // ------------------------------------------------
+                    // Post-deployment verification
+                    // ------------------------------------------------
 
-        stage('Post-Deployment Verification') {
-            steps {
-                sshagent(credentials: ['mini-soar-deploy-ssh']) {
                     sh '''
                         set -e
 
-                        echo "======================================"
-                        echo " Post-Deployment Verification"
-                        echo "======================================"
+                        TARGET="${DEPLOY_USER}@${DEPLOY_HOST}"
 
-                        # ------------------------------------------------
-                        # demo-web
-                        # ------------------------------------------------
-
-                        echo ""
-                        echo "Waiting for demo-web..."
-
-                        demo_ok=0
-
-                        for attempt in $(seq 1 30)
-                        do
-                            echo "demo-web attempt ${attempt}/30"
-
-                            if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://${DEPLOY_HOST}:8000/health \
-                                >/dev/null
-                            then
-                                demo_ok=1
-                                break
-                            fi
-
-                            sleep 2
-                        done
-
-                        if [ "${demo_ok}" -ne 1 ]
-                        then
-                            echo "demo-web health check FAILED"
-
+                        ssh_remote() {
                             ssh \
                                 -o BatchMode=yes \
                                 -o StrictHostKeyChecking=yes \
                                 -o ConnectTimeout=10 \
-                                "${DEPLOY_USER}@${DEPLOY_HOST}" \
-                                "docker logs --tail 100 demo-web" \
-                                || true
-
-                            exit 1
-                        fi
-
-                        echo "demo-web health PASS"
+                                -o ConnectionAttempts=2 \
+                                "$@"
+                        }
 
 
-                        # ------------------------------------------------
-                        # Mini-SOAR API
-                        # ------------------------------------------------
+                        wait_http() {
+                            NAME="$1"
+                            URL="$2"
+                            CONTAINER="$3"
+                            ATTEMPTS="${4:-30}"
 
-                        echo ""
-                        echo "Waiting for Mini-SOAR API..."
+                            for attempt in $(seq 1 "$ATTEMPTS")
+                            do
+                                if curl \
+                                    --fail \
+                                    --silent \
+                                    --show-error \
+                                    "$URL" \
+                                    >/dev/null
+                                then
+                                    echo "[PASS] ${NAME}"
+                                    return 0
+                                fi
 
-                        api_ok=0
+                                echo \
+                                    "[${attempt}/${ATTEMPTS}] Waiting for ${NAME}..."
 
-                        for attempt in $(seq 1 30)
-                        do
-                            echo "API attempt ${attempt}/30"
+                                sleep 2
+                            done
 
-                            if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://${DEPLOY_HOST}:9000/health \
-                                >/dev/null
+
+                            echo "[FAIL] ${NAME}"
+
+
+                            if [ -n "$CONTAINER" ]
                             then
-                                api_ok=1
-                                break
+                                echo ""
+                                echo "========== ${CONTAINER} logs =========="
+
+                                ssh_remote \
+                                    "${TARGET}" \
+                                    "docker logs --tail 100 ${CONTAINER}" \
+                                    || true
                             fi
 
-                            sleep 2
-                        done
+                            return 1
+                        }
 
-                        if [ "${api_ok}" -ne 1 ]
-                        then
-                            echo "Mini-SOAR API health check FAILED"
-
-                            ssh \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=yes \
-                                -o ConnectTimeout=10 \
-                                "${DEPLOY_USER}@${DEPLOY_HOST}" \
-                                "docker logs --tail 100 mini-soar-api" \
-                                || true
-
-                            exit 1
-                        fi
-
-                        echo "Mini-SOAR API health PASS"
-
-
-                        # ------------------------------------------------
-                        # Dashboard
-                        # ------------------------------------------------
 
                         echo ""
-                        echo "Waiting for dashboard..."
-
-                        dashboard_ok=0
-
-                        for attempt in $(seq 1 30)
-                        do
-                            echo "Dashboard attempt ${attempt}/30"
-
-                            if curl \
-                                --fail \
-                                --silent \
-                                --show-error \
-                                http://${DEPLOY_HOST}:8080/healthz \
-                                >/dev/null
-                            then
-                                dashboard_ok=1
-                                break
-                            fi
-
-                            sleep 2
-                        done
-
-                        if [ "${dashboard_ok}" -ne 1 ]
-                        then
-                            echo "Dashboard health check FAILED"
-
-                            ssh \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=yes \
-                                -o ConnectTimeout=10 \
-                                "${DEPLOY_USER}@${DEPLOY_HOST}" \
-                                "docker logs --tail 100 mini-soar-dashboard" \
-                                || true
-
-                            exit 1
-                        fi
-
-                        echo "Dashboard health PASS"
+                        echo "========== Post-Deployment Verification =========="
 
 
-                        # ------------------------------------------------
-                        # Dashboard -> API -> MariaDB
-                        # ------------------------------------------------
+                        wait_http \
+                            "demo-web" \
+                            "http://${DEPLOY_HOST}:8000/health" \
+                            "demo-web"
+
+
+                        wait_http \
+                            "Mini-SOAR API" \
+                            "http://${DEPLOY_HOST}:9000/health" \
+                            "mini-soar-api"
+
+
+                        wait_http \
+                            "Dashboard" \
+                            "http://${DEPLOY_HOST}:8080/healthz" \
+                            "mini-soar-dashboard"
+
 
                         echo ""
                         echo "Testing dashboard reverse proxy..."
@@ -1170,42 +1010,32 @@ pipeline {
                             --fail \
                             --silent \
                             --show-error \
-                            http://${DEPLOY_HOST}:8080/api/v1/remediations/summary \
+                            "http://${DEPLOY_HOST}:8080/api/v1/remediations/summary" \
                             >/dev/null
 
                         echo "Dashboard reverse proxy PASS"
 
 
-                        # ------------------------------------------------
-                        # Direct API -> MariaDB
-                        # ------------------------------------------------
-
                         echo ""
-                        echo "Testing deployed API database access..."
+                        echo "Testing API database access..."
 
                         curl \
                             --fail \
                             --silent \
                             --show-error \
-                            http://${DEPLOY_HOST}:9000/api/v1/remediations/summary \
+                            "http://${DEPLOY_HOST}:9000/api/v1/remediations/summary" \
                             >/dev/null
 
                         echo "API database access PASS"
 
 
-                        # ------------------------------------------------
-                        # Exact image version verification
-                        # ------------------------------------------------
-
                         echo ""
                         echo "Verifying deployed image versions..."
 
+
                         REMOTE_IMAGES="$(
-                            ssh \
-                                -o BatchMode=yes \
-                                -o StrictHostKeyChecking=yes \
-                                -o ConnectTimeout=10 \
-                                "${DEPLOY_USER}@${DEPLOY_HOST}" \
+                            ssh_remote \
+                                "${TARGET}" \
                                 "docker inspect \
                                     --format '{{.Name}}={{.Config.Image}}' \
                                     demo-web \
@@ -1213,185 +1043,112 @@ pipeline {
                                     mini-soar-dashboard"
                         )"
 
+
                         echo "${REMOTE_IMAGES}"
 
-                        echo "${REMOTE_IMAGES}" \
-                            | grep -Fxq "/demo-web=${DEMO_WEB_IMAGE}"
 
                         echo "${REMOTE_IMAGES}" \
-                            | grep -Fxq "/mini-soar-api=${MINI_SOAR_API_IMAGE}"
+                            | grep -Fxq \
+                            "/demo-web=${DEMO_WEB_IMAGE}"
+
 
                         echo "${REMOTE_IMAGES}" \
-                            | grep -Fxq "/mini-soar-dashboard=${DASHBOARD_IMAGE}"
+                            | grep -Fxq \
+                            "/mini-soar-api=${MINI_SOAR_API_IMAGE}"
 
-                        echo "Deployed image versions PASS"
+
+                        echo "${REMOTE_IMAGES}" \
+                            | grep -Fxq \
+                            "/mini-soar-dashboard=${DASHBOARD_IMAGE}"
 
 
-                        # ------------------------------------------------
-                        # Deployment metadata verification
-                        # ------------------------------------------------
+                        echo "Image version verification PASS"
+
 
                         echo ""
                         echo "Verifying deployment metadata..."
 
-                        ssh \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
-                            "grep -Fx 'BUILD_NUMBER=${BUILD_NUMBER}' \
+
+                        ssh_remote \
+                            "${TARGET}" \
+                            "grep -Fx \
+                                'BUILD_NUMBER=${BUILD_NUMBER}' \
                                 ${DEPLOY_DIR}/deployment.env"
+
 
                         echo "Deployment metadata PASS"
 
 
-                        # ------------------------------------------------
-                        # Remote state evidence
-                        # ------------------------------------------------
-
                         echo ""
                         echo "Remote application state:"
 
-                        ssh \
-                            -o BatchMode=yes \
-                            -o StrictHostKeyChecking=yes \
-                            -o ConnectTimeout=10 \
-                            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+
+                        ssh_remote \
+                            "${TARGET}" \
                             "docker ps \
                                 --filter name=demo-web \
                                 --filter name=mini-soar-api \
                                 --filter name=mini-soar-dashboard \
-                                --format 'table {{.Names}}\\t{{.Image}}\\t{{.Status}}'"
+                                --format \
+                                'table {{.Names}}\\t{{.Image}}\\t{{.Status}}'"
+
 
                         echo ""
-                        echo "======================================"
-                        echo " Post-deployment verification PASS"
-                        echo "======================================"
+                        echo "Post-deployment verification PASS"
                     '''
                 }
 
+
+                // All runtime checks passed.
                 script {
                     env.DEPLOY_VERIFIED = 'true'
                 }
-            }
-        }
 
 
-        // ============================================================
-        // SUCCESSFUL DEPLOYMENT CLEANUP
-        // ============================================================
+                // ----------------------------------------------------
+                // Finalize
+                // ----------------------------------------------------
 
-        stage('Finalize Deployment') {
-            steps {
                 sshagent(credentials: ['mini-soar-deploy-ssh']) {
                     sh '''
                         set +e
 
-                        echo "======================================"
-                        echo " Finalizing Deployment"
-                        echo "======================================"
+                        echo ""
+                        echo "========== Finalize =========="
+
 
                         ssh \
                             -o BatchMode=yes \
                             -o StrictHostKeyChecking=yes \
                             -o ConnectTimeout=10 \
+                            -o ConnectionAttempts=2 \
                             "${DEPLOY_USER}@${DEPLOY_HOST}" \
                             "
                                 cd ${DEPLOY_DIR} || exit 0
-
-                                echo 'Removing transferred image archive...'
 
                                 rm -f \
                                     mini-soar-images.tar.gz \
                                     mini-soar-images.tar.gz.sha256
 
-                                echo 'Cleaning dangling Docker images...'
-
                                 docker image prune -f || true
                             "
 
-                        echo ""
+
                         echo "Deployment cleanup completed."
+
+                        echo ""
+                        echo "======================================"
+                        echo " DEPLOY PASS"
+                        echo "======================================"
                     '''
                 }
-            }
-        }
-
-
-        // ============================================================
-        // SUMMARY
-        // ============================================================
-
-        stage('Build Summary') {
-            steps {
-                sh '''
-                    echo ""
-                    echo "======================================"
-                    echo " Mini-SOAR CI/CD SUCCESS"
-                    echo "======================================"
-
-                    echo ""
-                    echo "Backend:"
-                    echo "  Python compile             PASS"
-                    echo "  Dependency validation     PASS"
-
-                    echo ""
-                    echo "Frontend:"
-                    echo "  npm ci                     PASS"
-                    echo "  TypeScript/Vite build      PASS"
-
-                    echo ""
-                    echo "Docker:"
-                    echo "  demo-web image             PASS"
-                    echo "  Mini-SOAR API image        PASS"
-                    echo "  Dashboard image            PASS"
-                    echo "  Docker control plane       PASS"
-
-                    echo ""
-                    echo "Integration:"
-                    echo "  MariaDB                    PASS"
-                    echo "  API                        PASS"
-                    echo "  Dashboard reverse proxy    PASS"
-                    echo "  Self-healing               PASS"
-                    echo "  Audit persistence          PASS"
-
-                    echo ""
-                    echo "Security / Hardening:"
-                    echo "  Main deployment gate       PASS"
-                    echo "  Artifact SHA256            PASS"
-                    echo "  Deployment metadata        PASS"
-                    echo "  SSH host verification      PASS"
-
-                    echo ""
-                    echo "Deployment:"
-                    echo "  Artifact packaging         PASS"
-                    echo "  Artifact stash             PASS"
-                    echo "  SSH/SCP transfer           PASS"
-                    echo "  Docker image load          PASS"
-                    echo "  Compose deployment         PASS"
-                    echo "  Post-deploy health         PASS"
-                    echo "  Image version verify       PASS"
-
-                    echo ""
-                    echo "Build:"
-                    echo "  ${BUILD_NUMBER}"
-
-                    echo ""
-                    echo "Images deployed:"
-                    echo "  ${DEMO_WEB_IMAGE}"
-                    echo "  ${MINI_SOAR_API_IMAGE}"
-                    echo "  ${DASHBOARD_IMAGE}"
-
-                    echo ""
-                    echo "======================================"
-                '''
             }
         }
     }
 
 
     // ================================================================
-    // POST ACTIONS
+    // POST
     // ================================================================
 
     post {
@@ -1402,19 +1159,28 @@ pipeline {
 
         failure {
             script {
+
                 if (
                     env.DEPLOY_ATTEMPTED == 'true' &&
                     env.DEPLOY_VERIFIED != 'true'
                 ) {
-                    echo 'Deployment failure detected. Attempting rollback...'
 
-                    sshagent(credentials: ['mini-soar-deploy-ssh']) {
+                    echo \
+                        'Deployment failed after runtime modification started. Attempting rollback...'
+
+
+                    sshagent(
+                        credentials: ['mini-soar-deploy-ssh']
+                    ) {
+
                         sh '''
                             set +e
 
+                            echo ""
                             echo "======================================"
-                            echo " Automatic Rollback"
+                            echo " AUTOMATIC ROLLBACK"
                             echo "======================================"
+
 
                             ssh \
                                 -o BatchMode=yes \
@@ -1427,21 +1193,26 @@ pipeline {
 
                                     cd ${DEPLOY_DIR}
 
+
                                     if [ ! -f .deploy.env.previous ] || \
                                        [ ! -f docker-compose.previous.yml ]
                                     then
-                                        echo 'Rollback unavailable:'
-                                        echo 'No previous deployment metadata exists.'
+                                        echo \
+                                            'Rollback unavailable: no previous release.'
+
                                         exit 2
                                     fi
+
 
                                     echo ''
                                     echo 'Previous release:'
 
                                     cat .deploy.env.previous
 
+
                                     echo ''
-                                    echo 'Restoring previous Docker Compose configuration...'
+                                    echo 'Restoring previous release...'
+
 
                                     docker compose \
                                         --env-file .deploy.env.previous \
@@ -1449,13 +1220,16 @@ pipeline {
                                         up -d \
                                         --no-build
 
+
                                     cp \
                                         .deploy.env.previous \
                                         .deploy.env
 
+
                                     cp \
                                         docker-compose.previous.yml \
                                         docker-compose.yml
+
 
                                     if [ -f deployment.previous.env ]
                                     then
@@ -1464,66 +1238,84 @@ pipeline {
                                             deployment.env
                                     fi
 
+
                                     echo ''
-                                    echo 'Waiting briefly for rollback services...'
+                                    echo 'Waiting for rollback services...'
 
                                     sleep 10
 
+
                                     echo ''
-                                    echo 'Rollback stack:'
+                                    echo 'Rollback state:'
+
 
                                     docker compose \
                                         --env-file .deploy.env \
                                         -f docker-compose.yml \
                                         ps
 
+
                                     echo ''
                                     echo 'ROLLBACK COMPLETED'
                                 "
 
+
                             ROLLBACK_RC=$?
+
 
                             if [ "${ROLLBACK_RC}" -eq 0 ]
                             then
                                 echo ""
-                                echo "Automatic rollback completed successfully."
+                                echo \
+                                    "Automatic rollback completed successfully."
                             else
                                 echo ""
-                                echo "WARNING: automatic rollback failed."
-                                echo "Rollback exit code: ${ROLLBACK_RC}"
-                                echo "Manual recovery may be required."
+                                echo \
+                                    "WARNING: automatic rollback failed."
+
+                                echo \
+                                    "Rollback exit code: ${ROLLBACK_RC}"
+
+                                echo \
+                                    "Manual recovery may be required."
                             fi
 
-                            // Preserve original pipeline failure.
+
+                            # Preserve original Jenkins failure.
                             exit 0
                         '''
                     }
+
                 } else {
-                    echo 'Rollback not required.'
-                    echo "DEPLOY_ATTEMPTED=${env.DEPLOY_ATTEMPTED}"
-                    echo "DEPLOY_VERIFIED=${env.DEPLOY_VERIFIED}"
+
+                    echo "Rollback not required."
+                    echo \
+                        "DEPLOY_ATTEMPTED=${env.DEPLOY_ATTEMPTED}"
+                    echo \
+                        "DEPLOY_VERIFIED=${env.DEPLOY_VERIFIED}"
                 }
             }
 
-            echo 'Mini-SOAR CI/CD pipeline FAILED. Check the failed stage above.'
+
+            echo \
+                'Mini-SOAR CI/CD pipeline FAILED. Check the failed step above.'
         }
 
 
         // ------------------------------------------------------------
-        // Jenkins CI cleanup
+        // CI cleanup
         // ------------------------------------------------------------
 
         always {
+
             sh '''
                 set +e
 
                 echo ""
                 echo "======================================"
-                echo " Cleaning Jenkins CI Environment"
+                echo " Jenkins CI Cleanup"
                 echo "======================================"
 
-                echo ""
-                echo "Stopping isolated CI stack..."
 
                 docker compose \
                     -f docker-compose.ci.yml \
@@ -1533,9 +1325,6 @@ pipeline {
                     || true
 
 
-                echo ""
-                echo "Removing build-specific CI images..."
-
                 docker image rm \
                     "${DEMO_WEB_IMAGE}" \
                     "${MINI_SOAR_API_IMAGE}" \
@@ -1544,14 +1333,8 @@ pipeline {
                     || true
 
 
-                echo ""
-                echo "Removing dangling images..."
-
                 docker image prune -f || true
 
-
-                echo ""
-                echo "Removing Docker builder cache older than 7 days..."
 
                 docker builder prune \
                     -f \
@@ -1559,16 +1342,15 @@ pipeline {
                     || true
 
 
-                echo ""
-                echo "Removing temporary files..."
+                rm -rf \
+                    .jenkins-venv \
+                    deploy-artifacts \
+                    || true
 
-                rm -rf .jenkins-venv || true
-                rm -rf deploy-artifacts || true
 
-
-                echo ""
                 echo "Jenkins cleanup completed."
             '''
+
 
             cleanWs(
                 deleteDirs: true,
@@ -1577,8 +1359,54 @@ pipeline {
         }
 
 
+        // ------------------------------------------------------------
+        // Success summary
+        // ------------------------------------------------------------
+
         success {
-            echo 'Mini-SOAR full-stack CI/CD pipeline completed successfully.'
+
+            echo """
+======================================
+ Mini-SOAR CI/CD SUCCESS
+======================================
+
+Pipeline:
+  Check                     PASS
+  Build & Test              PASS
+  Deploy                    PASS
+
+Validation:
+  Backend                   PASS
+  Frontend                  PASS
+  Docker Compose            PASS
+
+Integration:
+  API                       PASS
+  MariaDB                   PASS
+  Dashboard proxy           PASS
+  Docker control plane      PASS
+  Self-healing              PASS
+  Audit persistence         PASS
+
+Deployment:
+  Main branch gate          PASS
+  SHA256 validation         PASS
+  Artifact transfer         PASS
+  Docker load               PASS
+  Compose deployment        PASS
+  Post-deploy verification  PASS
+  Image version verify      PASS
+
+Build:
+  ${BUILD_NUMBER}
+
+Images:
+  ${DEMO_WEB_IMAGE}
+  ${MINI_SOAR_API_IMAGE}
+  ${DASHBOARD_IMAGE}
+
+======================================
+"""
         }
     }
 }
